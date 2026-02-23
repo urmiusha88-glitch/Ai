@@ -15,7 +15,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8718001559:AAEJNbpg2BqFquj
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-5da4d6648bbe48158c9dd2ba656ac26d")
 
 # Railway তে Postgres অ্যাড করলে এই DATABASE_URL টি অটোমেটিক পেয়ে যাবেন
-DATABASE_URL = os.getenv("postgresql://postgres:cIJaXIJvmBepjzPcXskiJgFPwvkLdlEA@maglev.proxy.rlwy.net:22522/railway") 
+DATABASE_URL = os.getenv("postgresql://postgres:hQKBupovepWPRJyTUCiqYrUfEnoeRYYv@trolley.proxy.rlwy.net:36125/railway") 
 
 OWNER_ID = 6198703244  
 
@@ -300,4 +300,5 @@ if __name__ == "__main__":
         print("🤖 Bot is starting up safely...")
         bot.polling(non_stop=True, timeout=60, long_polling_timeout=60)
     else:
+
         print("❌ ERROR: DATABASE_URL paoa jacche na! Railway te Postgres Database add korun.")
