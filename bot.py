@@ -11,8 +11,8 @@ from io import BytesIO
 # ==========================================
 # os.getenv এর কাজ হলো Railway Variables থেকে ডাটা নেওয়া। 
 # যদি ভেরিয়েবল না থাকে, তাহলে কমার (,) পরের অংশটুকু কাজ করবে।
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8718001559:AAEJNbpg2BqFqujbjdVIYQMKa4bHO2b4S4I")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-5da4d6648bbe48158c9dd2ba656ac26d")
+TELEGRAM_BOT_TOKEN = os.getenv("8718001559:AAEJNbpg2BqFqujbjdVIYQMKa4bHO2b4S4I")
+DEEPSEEK_API_KEY = os.getenv("sk-5da4d6648bbe48158c9dd2ba656ac26d")
 
 # Railway তে Postgres অ্যাড করলে এই DATABASE_URL টি অটোমেটিক পেয়ে যাবেন
 DATABASE_URL = os.getenv("postgresql://postgres:hQKBupovepWPRJyTUCiqYrUfEnoeRYYv@trolley.proxy.rlwy.net:36125/railway") 
@@ -302,3 +302,4 @@ if __name__ == "__main__":
     else:
 
         print("❌ ERROR: DATABASE_URL paoa jacche na! Railway te Postgres Database add korun.")
+
