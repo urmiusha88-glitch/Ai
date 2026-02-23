@@ -15,14 +15,14 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # 👇 CONFIGURATION
 # ======================================================
 TOKEN = "8290942305:AAGFtnKV8P5xk591NejJ5hsKEJ02foiRpEk"
-ADMIN_ID = 6198703244  
+ADMIN_ID = 6198703244
 ADMIN_USERNAME = "@yours_ononto"
 
 DEEPSEEK_API_KEY = "sk-5da4d6648bbe48158c9dd2ba656ac26d"
 DATABASE_URL = "postgresql://postgres:hQKBupovepWPRJyTUCiqYrUfEnoeRYYv@trolley.proxy.rlwy.net:36125/railway"
 
-BKASH_NUMBER = "01846849460"    
-NAGAD_NUMBER = "01846849460"    
+BKASH_NUMBER = "01846849460"
+NAGAD_NUMBER = "01846849460"
 ADMIN_LOG_ID = -1003769033152
 PUBLIC_LOG_ID = -1003775622081
 CHANNEL_ID = "@minatologs"
@@ -39,21 +39,22 @@ def get_db_conn():
 def init_db():
     conn = get_db_conn()
     c = conn.cursor()
-    # ১. টেবিল তৈরি ও কলাম ফিক্স
+    # Create tables
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (user_id BIGINT PRIMARY KEY, credits INTEGER DEFAULT 0, role TEXT DEFAULT 'Free', 
-                  generated_count INTEGER DEFAULT 0, full_name TEXT, expiry_date DATE DEFAULT CURRENT_DATE)''')
+                 generated_count INTEGER DEFAULT 0, full_name TEXT, expiry_date DATE DEFAULT CURRENT_DATE)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS codes 
                  (code TEXT PRIMARY KEY, credit_amount INTEGER, role_reward TEXT, is_redeemed INTEGER DEFAULT 0)''')
     
-    # ২. গুরুত্বপূর্ণ: NULL ভ্যালু থাকলে সেগুলোকে ০ করে দেওয়া (যাতে রিডিম ফিক্স হয়)
+    # Fix null values in redeemed
     c.execute("UPDATE codes SET is_redeemed = 0 WHERE is_redeemed IS NULL")
     
     try:
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS generated_count INTEGER DEFAULT 0")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS expiry_date DATE DEFAULT CURRENT_DATE")
-    except: pass
+    except:
+        pass
     
     conn.commit()
     conn.close()
@@ -79,7 +80,8 @@ async def check_join(user_id, context):
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status not in ['left', 'kicked']
-    except: return True
+    except:
+        return True
 
 # --- AI API ---
 async def ask_ai(prompt):
@@ -89,7 +91,8 @@ async def ask_ai(prompt):
         try:
             r = await client.post("https://api.deepseek.com/chat/completions", json=data, headers=headers, timeout=60)
             return r.json()['choices'][0]['message']['content']
-        except: return "❌ Server Busy."
+        except:
+            return "❌ Server Busy. Pare abar try korun."
 
 # --- START UI ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -116,8 +119,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🧠 AI Menu", callback_data='ai_menu')],
             [InlineKeyboardButton("💰 Buy Credits", callback_data='deposit'), InlineKeyboardButton("🎫 Redeem", callback_data='redeem_ui')]
         ]
-        if update.message: await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-        else: await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        
+        if update.message:
+            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        elif update.callback_query:
+            await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     except Exception as e:
         print(f"Start Error: {e}")
 
@@ -125,24 +131,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmd = update.message.text.split()[0].replace('/', '')
     prompt = " ".join(context.args)
-    if not prompt: return await update.message.reply_text(f"Usage: `/{cmd} your prompt`")
+    if not prompt:
+        return await update.message.reply_text(f"Usage: `/{cmd} your prompt`", parse_mode='Markdown')
 
     u = get_user(update.effective_user.id)
-    cost = 20 if cmd == 'image' else 5
-    if u[1] < cost: return await update.message.reply_text("❌ No Credits!")
+    cost = 20 if cmd in ['image', 'photo'] else 5
+    
+    if u[1] < cost:
+        return await update.message.reply_text("❌ Not enough Credits! Please buy more.")
 
     m = await update.message.reply_text("⏳ Thinking...")
-    if cmd == 'image':
+    if cmd in ['image', 'photo']:
         url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
-        await update.message.reply_photo(url, caption="🎨 **Enjoy our AI!**", parse_mode='Markdown')
+        await update.message.reply_photo(url, caption="🎨 **Enjoy our AI! 🎉**", parse_mode='Markdown')
         await m.delete()
     else:
         res = await ask_ai(prompt)
-        await m.edit_text(f"{res}\n\n⚡ **Enjoy our AI!**", parse_mode='Markdown')
+        await m.edit_text(f"{res}\n\n⚡ **Enjoy our AI! 🎉**", parse_mode='Markdown')
     
-    conn = get_db_conn(); c = conn.cursor()
+    conn = get_db_conn()
+    c = conn.cursor()
     c.execute("UPDATE users SET credits=credits-%s WHERE user_id=%s", (cost, u[0]))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 # --- ADMIN STATS ---
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,60 +163,83 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- GEN & REDEEM FIX ---
 async def gencoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("❌ Only admins can use this command.")
+    
     try:
-        amt, plan = int(context.args[0]), context.args[1].upper()
+        amt = int(context.args[0])
+        plan = context.args[1].upper() if len(context.args) > 1 else "BRONZE"
         code = f"CODE-{''.join(random.choices(string.ascii_uppercase + string.digits, k=10))}"
-        conn = get_db_conn(); c = conn.cursor()
+        
+        conn = get_db_conn()
+        c = conn.cursor()
         c.execute("INSERT INTO codes (code, credit_amount, role_reward, is_redeemed) VALUES (%s, %s, %s, 0)", (code, amt, plan))
-        conn.commit(); conn.close()
-        await update.message.reply_text(f"🎫 **New Code:** `{code}`\nPlan: {plan}\nCoins: {amt}\n\n💡 Reply with /redeem to activate!", parse_mode='Markdown')
-    except: await update.message.reply_text("❌ Usage: `/gencoins 500 GOLD`")
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(f"🎫 **New Code Generated:** `{code}`\nPlan: {plan}\nCoins: {amt}\n\n💡 Reply to this message with `/redeem` to claim!", parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text("❌ Usage: `/gencoin 500 GOLD`", parse_mode='Markdown')
 
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code_text = None
-    if update.message.reply_to_message:
+    
+    # Check if user replied to a code message
+    if update.message.reply_to_message and update.message.reply_to_message.text:
         match = re.search(r'CODE-[A-Z0-9]+', update.message.reply_to_message.text)
-        if match: code_text = match.group(0)
-    elif context.args:
+        if match:
+            code_text = match.group(0)
+            
+    # If not a reply, check if they typed "/redeem CODE-XXXX"
+    if not code_text and context.args:
         code_text = context.args[0].strip()
 
-    if not code_text: return await update.message.reply_text("❌ Reply to a code message with /redeem")
+    if not code_text:
+        return await update.message.reply_text("❌ Kono code e reply kore `/redeem` likhun ba `/redeem CODE-XXXX` likhun.", parse_mode='Markdown')
 
-    conn = get_db_conn(); c = conn.cursor()
-    # COALESCE ব্যবহার করা হয়েছে যাতে NULL থাকলেও সেটা ০ হিসেবে গণ্য হয়
+    conn = get_db_conn()
+    c = conn.cursor()
     c.execute("SELECT credit_amount, role_reward FROM codes WHERE code=%s AND COALESCE(is_redeemed, 0) = 0", (code_text,))
     res = c.fetchone()
     
     if res:
         amt, plan = res[0], res[1]
         new_expiry = date.today() + timedelta(days=PLAN_DAYS.get(plan, 1))
+        
         c.execute("UPDATE codes SET is_redeemed = 1 WHERE code=%s", (code_text,))
         c.execute("UPDATE users SET credits=credits+%s, role=%s, expiry_date=%s WHERE user_id=%s", (amt, plan, new_expiry, update.effective_user.id))
         conn.commit()
-        await update.message.reply_text(f"🎉 **Redeem Successful!**\n💎 {amt} Coins Added.\n👑 Rank: {plan}\n\n⚡ **Enjoy our AI!**", parse_mode='Markdown')
+        
+        await update.message.reply_text(f"🎉 **Redeem Successful!**\n💎 {amt} Coins Added.\n👑 Rank: {plan}\n\n⚡ **Enjoy our AI! 🎉**", parse_mode='Markdown')
     else:
-        await update.message.reply_text("❌ Invalid or Already Redeemed.")
+        await update.message.reply_text("❌ Invalid dekhacche! Ei code ta bhul ba already use kora hoye geche.")
+        
     conn.close()
 
 # --- CALLBACKS ---
 async def handle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    if q.data == 'main_menu': await start(update, context)
+    await q.answer() # Prevent loading animation on button click
+    
+    if q.data == 'main_menu':
+        await start(update, context)
     elif q.data == 'ai_menu':
-        await q.message.edit_text("💡 **AI Commands:**\n/chat, /image, /script, /code", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
+        await q.message.edit_text("💡 **AI Commands:**\n`/chat [prompt]`\n`/image [prompt]`\n`/script [prompt]`\n`/code [prompt]`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
     elif q.data == 'deposit':
-        await q.message.edit_text(f"💳 **Payment:**\nBkash/Nagad: `{BKASH_NUMBER}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
+        await q.message.edit_text(f"💳 **Payment Info:**\nBkash/Nagad (Personal): `{BKASH_NUMBER}`\n\nPayment kore admin er sathe jogajog korun: {ADMIN_USERNAME}", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
+    elif q.data == 'redeem_ui':
+        await q.message.edit_text("🎫 **Redeem System:**\nKono code e reply kore `/redeem` likhun, othoba `/redeem CODE-XXXX` format e command din.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
 
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler(["chat", "image", "script", "code"], ai_handler))
+    app.add_handler(CommandHandler(["chat", "image", "photo", "script", "code"], ai_handler))
     app.add_handler(CommandHandler("stats", admin_stats))
-    app.add_handler(CommandHandler("gencoins", gencoins))
+    app.add_handler(CommandHandler(["gencoins", "gencoin"], gencoins))
     app.add_handler(CommandHandler("redeem", redeem))
     app.add_handler(CallbackQueryHandler(handle_cb))
-    print("🤖 Bot is fixed and running!")
+    
+    print("🤖 Bot is fixed, running without errors!")
     app.run_polling()
 
 if __name__ == '__main__':
