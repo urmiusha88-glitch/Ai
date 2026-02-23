@@ -39,26 +39,35 @@ def get_db_conn():
 def init_db():
     conn = get_db_conn()
     c = conn.cursor()
-    # Create tables
+    
+    # 1. Create table if it doesn't exist completely
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (user_id BIGINT PRIMARY KEY, credits INTEGER DEFAULT 0, role TEXT DEFAULT 'Free', 
                  generated_count INTEGER DEFAULT 0, full_name TEXT, expiry_date DATE DEFAULT CURRENT_DATE)''')
     
+    # 2. FORCE FIX: Add missing columns if table existed from old code
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS credits INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'Free'")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS generated_count INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS expiry_date DATE DEFAULT CURRENT_DATE")
+        conn.commit()
+    except Exception as e:
+        conn.rollback() # Ignores error if columns already exist
+        
+    # 3. Code Table
     c.execute('''CREATE TABLE IF NOT EXISTS codes 
                  (code TEXT PRIMARY KEY, credit_amount INTEGER, role_reward TEXT, is_redeemed INTEGER DEFAULT 0)''')
     
-    # Fix null values in redeemed
-    c.execute("UPDATE codes SET is_redeemed = 0 WHERE is_redeemed IS NULL")
-    
     try:
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS generated_count INTEGER DEFAULT 0")
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS expiry_date DATE DEFAULT CURRENT_DATE")
+        c.execute("UPDATE codes SET is_redeemed = 0 WHERE is_redeemed IS NULL")
+        conn.commit()
     except:
-        pass
-    
-    conn.commit()
+        conn.rollback()
+        
     conn.close()
-    print("✅ Database Fixed & Synchronized!")
+    print("✅ Database Structure Fixed & Synchronized!")
 
 init_db()
 
@@ -179,18 +188,16 @@ async def gencoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(f"🎫 **New Code Generated:** `{code}`\nPlan: {plan}\nCoins: {amt}\n\n💡 Reply to this message with `/redeem` to claim!", parse_mode='Markdown')
     except Exception as e:
-        await update.message.reply_text("❌ Usage: `/gencoin 500 GOLD`", parse_mode='Markdown')
+        await update.message.reply_text("❌ Usage: `/gencoins 500 GOLD`", parse_mode='Markdown')
 
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code_text = None
     
-    # Check if user replied to a code message
     if update.message.reply_to_message and update.message.reply_to_message.text:
         match = re.search(r'CODE-[A-Z0-9]+', update.message.reply_to_message.text)
         if match:
             code_text = match.group(0)
             
-    # If not a reply, check if they typed "/redeem CODE-XXXX"
     if not code_text and context.args:
         code_text = context.args[0].strip()
 
@@ -219,7 +226,7 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- CALLBACKS ---
 async def handle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer() # Prevent loading animation on button click
+    await q.answer()
     
     if q.data == 'main_menu':
         await start(update, context)
