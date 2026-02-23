@@ -16,7 +16,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # ======================================================
 TOKEN = "8290942305:AAGFtnKV8P5xk591NejJ5hsKEJ02foiRpEk"
 OWNER_ID = 6198703244  # Apni (Owner)
-ADMIN_USERNAME = "@yours_ononto"
+
+# FIX: Escaped the underscore with a backslash to prevent Markdown parsing crash!
+ADMIN_USERNAME = "@yours\_ononto"  
 
 DEEPSEEK_API_KEY = "sk-5da4d6648bbe48158c9dd2ba656ac26d"
 DATABASE_URL = "postgresql://postgres:hQKBupovepWPRJyTUCiqYrUfEnoeRYYv@trolley.proxy.rlwy.net:36125/railway"
@@ -38,6 +40,11 @@ MAINTENANCE_MODE = False
 # --- TIMEZONE FIX (BANGLADESH TIME) ---
 def get_bd_time():
     return datetime.utcnow() + timedelta(hours=6)
+
+# --- SAFE MARKDOWN TEXT GENERATOR (PREVENTS CRASHES) ---
+def safe_md(text):
+    if not text: return "User"
+    return str(text).replace("_", "\\_").replace("*", "\\*").replace("`", "")
 
 # --- DATABASE ENGINE ---
 def get_db_conn():
@@ -143,7 +150,7 @@ async def ask_ai(prompt, user_name="User"):
             r = await client.post("https://api.deepseek.com/chat/completions", json=data, headers=headers)
             return r.json()['choices'][0]['message']['content']
         except Exception:
-            return "❌ Server Busy. Pare abar try korun."
+            return "❌ Server Busy. Please try again later."
 
 # ======================================================
 # PUBLIC UI & COMMANDS
@@ -177,7 +184,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             f"🤖 **𝐌𝐈𝐍𝐀𝐓𝐎 𝐀𝐈 𝐀𝐒𝐒𝐈𝐒𝐓𝐀𝐍𝐓**\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"👤 **User:** `{u[4]}`\n"
+            f"👤 **User:** `{safe_md(u[4])}`\n"
             f"💎 **Coins:** {coins_display}\n"
             f"👑 **Rank:** `{status}`\n"
             f"━━━━━━━━━━━━━━━━━━"
@@ -216,21 +223,21 @@ async def report_bug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     msg = " ".join(context.args)
     if not msg:
-        return await update.message.reply_text("❌ Please likhun apni ki janate chan.\n**Usage:** `/report chat e problem hocche` ba kono suggestion.", parse_mode='Markdown')
+        return await update.message.reply_text("❌ Please describe the issue or provide a suggestion.\n**Usage:** `/report chat is slow`", parse_mode='Markdown')
         
     report_text = (
         f"🚨 **NEW REPORT / SUGGESTION** 🚨\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"👤 **From:** {user.first_name} (`{user.id}`)\n"
-        f"💬 **Message:** {msg}\n"
+        f"👤 **From:** {safe_md(user.first_name)} (`{user.id}`)\n"
+        f"💬 **Message:** {safe_md(msg)}\n"
         f"━━━━━━━━━━━━━━━━━━"
     )
     
     try:
         await context.bot.send_message(OWNER_ID, report_text, parse_mode='Markdown')
-        await update.message.reply_text("✅ Apnar message sothik vabe Owner er kache send kora hoyeche. Dhonnobad!", parse_mode='Markdown')
+        await update.message.reply_text("✅ Your report has been successfully sent to the Admin. Thank you!", parse_mode='Markdown')
     except Exception:
-        await update.message.reply_text("❌ Owner ke message pathate somossa hoyeche.")
+        await update.message.reply_text("❌ Failed to send the message to the Admin. Please try again later.")
 
 async def user_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -289,7 +296,7 @@ async def process_ai_message(update: Update, prompt: str):
     
     if user.id in active_chats and not active_chats[user.id].get("greeted", True):
         intro_text = (
-            f"👋 Hello **{user.first_name}**!\n"
+            f"👋 Hello **{safe_md(user.first_name)}**!\n"
             f"🤖 I am Minato AI, created by **Ononto Hasan**.\n"
             f"🔗 [FB: Ononto Hasan](https://www.facebook.com/yours.ononto)\n"
             f"━━━━━━━━━━━━━━━━━━\n\n"
@@ -614,14 +621,11 @@ async def toggle_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif state == "off":
         MAINTENANCE_MODE = False
         
-        # Format update notes automatically
         if len(context.args) > 1:
             updates_raw = " ".join(context.args[1:])
-            # Split sentences by comma or dot to create automatic bullet points
             updates_list = [u.strip() for u in re.split(r'[,|.]', updates_raw) if u.strip()]
             updates_formatted = "\n".join([f"▪️ {u.capitalize()}" for u in updates_list])
         else:
-            # Default professional update notes if owner types nothing
             updates_formatted = (
                 "▪️ Core system performance optimized.\n"
                 "▪️ Minor bug fixes for smoother chats.\n"
@@ -751,14 +755,15 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
     
     if q.data == 'main_menu':
+        await q.answer()
         await start(update, context)
         
     elif q.data == 'daily_claim':
         user_id = update.effective_user.id
-        if check_banned(user_id): return
+        if check_banned(user_id): 
+            return await q.answer("❌ You are banned.", show_alert=True)
         
         conn = get_db_conn()
         c = conn.cursor()
@@ -783,12 +788,16 @@ async def handle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         
     elif q.data == 'my_status':
+        await q.answer()
         await user_status(update, context)
     elif q.data == 'ai_menu':
+        await q.answer()
         await q.message.edit_text("💡 **AI Commands:**\n`/chat` - Continuous Chat On\n`/stop` - Chat Off\n`/image [prompt]` - Create Image\n`/help` - Show all commands", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
     elif q.data == 'deposit':
+        await q.answer()
         await q.message.edit_text(f"💳 **Payment Info:**\nBkash/Nagad: `{BKASH_NUMBER}`\n\nPayment kore admin er sathe jogajog korun: {ADMIN_USERNAME}", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
     elif q.data == 'redeem_ui':
+        await q.answer()
         await q.message.edit_text("🎫 **Redeem System:**\nKono code e reply kore `/redeem` likhun, othoba `/redeem CODE-XXXX` format e command din.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
 
 def main():
@@ -826,7 +835,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_cb))
     
-    print("🤖 Bot is completely ready with Professional English Maintenance System!")
+    print("🤖 Bot is completely ready with English Report and Bug Fixes!")
     app.run_polling()
 
 if __name__ == '__main__':
