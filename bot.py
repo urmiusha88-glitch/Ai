@@ -1,313 +1,532 @@
-import telebot
-import requests
-import psutil
+import logging
 import psycopg2
-from openai import OpenAI
-from io import BytesIO
+import random
+import string
+import os
+import urllib.parse
+import httpx
+from datetime import date
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 
-# ==========================================
-# ⚙️ Configuration (100% Fixed & Direct)
-# ==========================================
-# os.getenv বাদ দিয়ে সরাসরি টোকেন বসানো হয়েছে। আর কোনো Error আসবে না!
-TELEGRAM_BOT_TOKEN = "8718001559:AAEJNbpg2BqFqujbjdVIYQMKa4bHO2b4S4I"
+# ======================================================
+# 👇 CONFIGURATION SECTION
+# ======================================================
+TOKEN = "8290942305:AAGFtnKV8P5xk591NejJ5hsKEJ02foiRpEk"  # ⚠️ BotFather থেকে পাওয়া টোকেনটি বসান
+ADMIN_ID = 6198703244  # Your Telegram ID (MAIN OWNER)
+
+# 🤖 API KEYS
 DEEPSEEK_API_KEY = "sk-5da4d6648bbe48158c9dd2ba656ac26d"
+
+# 💰 PAYMENT DETAILS
+BKASH_NUMBER = "01846849460"    
+NAGAD_NUMBER = "01846849460"    
+BINANCE_PAY_ID = "Unavailable"  
+
+# 🗄️ DATABASE URL
 DATABASE_URL = "postgresql://postgres:hQKBupovepWPRJyTUCiqYrUfEnoeRYYv@trolley.proxy.rlwy.net:36125/railway"
 
-OWNER_ID = 6198703244  
+# 🔴 GROUP & CHANNEL IDS
+ADMIN_LOG_ID = -1003769033152
+PUBLIC_LOG_ID = -1003775622081
 
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
-client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
+# ⚠️ Force Join Channel
+CHANNEL_ID = "@minatologs"
+CHANNEL_INVITE_LINK = "https://t.me/minatologs/2"
 
-# ==========================================
-# 🗄️ Database Setup (PostgreSQL)
-# ==========================================
+# ======================================================
+FB_ID_LINK ="https://www.facebook.com/yours.ononto"
+FB_PAGE_LINK = "https://www.facebook.com/toxicnaaa69"
+# ======================================================
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# --- DATABASE CONNECTION HELPER ---
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-def setup_db():
+# --- INIT DATABASE ---
+def init_db():
     conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            name TEXT,
-            coins INTEGER,
-            role TEXT,
-            queries INTEGER
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS bot_stats (
-            id INTEGER PRIMARY KEY,
-            total_queries INTEGER
-        )
-    ''')
-    cursor.execute('INSERT INTO bot_stats (id, total_queries) VALUES (1, 0) ON CONFLICT (id) DO NOTHING')
-    
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users 
+                 (user_id BIGINT PRIMARY KEY, credits INTEGER, role TEXT, generated_count INTEGER DEFAULT 0, full_name TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS codes 
+                 (code TEXT PRIMARY KEY, credit_amount INTEGER, role_reward TEXT, is_redeemed INTEGER)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS admins 
+                 (admin_id BIGINT PRIMARY KEY)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS bonus 
+                 (user_id BIGINT PRIMARY KEY, last_claim DATE)''')
     conn.commit()
-    cursor.close()
     conn.close()
 
-FREE_COINS = 5
+init_db()
 
-def init_user(user):
+# --- HELPER FUNCTIONS ---
+def is_admin(user_id):
+    if user_id == ADMIN_ID:
+        return True
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE user_id = %s', (user.id,))
-    if not cursor.fetchone():
-        cursor.execute('INSERT INTO users (user_id, name, coins, role, queries) VALUES (%s, %s, %s, %s, %s)',
-                       (user.id, user.first_name, FREE_COINS, 'free', 0))
+    c = conn.cursor()
+    c.execute("SELECT * FROM admins WHERE admin_id=%s", (user_id,))
+    res = c.fetchone()
+    conn.close()
+    return bool(res)
+
+def get_user(user_id, first_name="Unknown"):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
+    user = c.fetchone()
+    if not user:
+        # New users get 50 free credits to test the AI
+        c.execute("INSERT INTO users (user_id, credits, role, generated_count, full_name) VALUES (%s, %s, %s, 0, %s)", (user_id, 50, 'Free', first_name))
+        conn.commit()
+        user = (user_id, 50, 'Free', 0, first_name)
     else:
-        cursor.execute('UPDATE users SET name = %s WHERE user_id = %s', (user.first_name, user.id))
-    conn.commit()
-    cursor.close()
+        if first_name != "Unknown":
+            c.execute("UPDATE users SET full_name=%s WHERE user_id=%s", (first_name, user_id))
+            conn.commit()
     conn.close()
+    return user
 
-def deduct_coin(user_id):
+async def check_join(user_id, context):
+    try:
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        if member.status in ['left', 'kicked']: return False
+        return True
+    except: 
+        return True 
+
+def deduct_credits(user_id, amount):
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT coins FROM users WHERE user_id = %s', (user_id,))
-    result = cursor.fetchone()
-    success = False
-    if result and result[0] > 0:
-        cursor.execute('UPDATE users SET coins = coins - 1, queries = queries + 1 WHERE user_id = %s', (user_id,))
-        cursor.execute('UPDATE bot_stats SET total_queries = total_queries + 1 WHERE id = 1')
-        success = True
+    c = conn.cursor()
+    c.execute("UPDATE users SET credits = credits - %s, generated_count = generated_count + 1 WHERE user_id=%s", (amount, user_id))
     conn.commit()
-    cursor.close()
     conn.close()
-    return success
 
-def get_user(user_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT name, coins, role, queries FROM users WHERE user_id = %s', (user_id,))
-    result = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    return result
+# --- AI INTEGRATION (DEEPSEEK) ---
+async def generate_deepseek_response(prompt, system_instruction="You are a helpful AI assistant."):
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": prompt}
+        ]
+    }
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post("https://api.deepseek.com/chat/completions", json=data, headers=headers, timeout=60.0)
+            response.raise_for_status()
+            return response.json()['choices'][0]['message']['content']
+        except Exception as e:
+            return f"❌ AI Error: {e}"
 
-# ==========================================
-# 🤖 Bot Commands & Updated UI
-# ==========================================
+# --- HANDLERS ---
 
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    init_user(message.from_user)
-    user_data = get_user(message.from_user.id)
+# 1. MAIN MENU UI
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not await check_join(user.id, context):
+        await update.message.reply_text(
+            f"❌ **ACCESS DENIED**\n\n⚠️ You must join our official channel to use this bot.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Join Channel First", url=CHANNEL_INVITE_LINK)]])
+        )
+        return
+
+    db_user = get_user(user.id, user.first_name)
     
     welcome_text = (
-        f"🤖 **স্বাগতম, {user_data[0]}!**\n"
-        "আমি একটি অত্যাধুনিক AI Bot, যা আপনার দৈনন্দিন কাজকে আরও সহজ করবে।\n\n"
-        "⚡ **সার্ভিসসমূহ:**\n"
-        "📝 `/script [বিষয়]` - DeepSeek AI দিয়ে চ্যাট, কোডিং বা স্ক্রিপ্ট (১ কয়েন)\n"
-        "🎨 `/photo [বর্ণনা]` - AI দিয়ে হাই-কোয়ালিটি ছবি জেনারেট (১ কয়েন)\n\n"
-        "📊 **অ্যাকাউন্ট ও অন্যান্য:**\n"
-        "👤 `/status` - আপনার প্রোফাইল ও কয়েন দেখুন\n"
-        "💎 `/premium` - আরও কয়েন ও প্রিমিয়াম রোল কিনুন\n"
-        "👨‍💻 `/developer` - বট ডেভেলপারের তথ্য"
+        f"🤖 **𝐌𝐈𝐍𝐀𝐓𝐎 𝐀𝐈 𝐀𝐒𝐒𝐈𝐒𝐓𝐀𝐍𝐓** 🤖\n"
+        f"▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱\n"
+        f"👋 **Welcome, {user.first_name}!**\n"
+        f"Powered by Advanced DeepSeek AI 🧠\n\n"
+        f"👤 **𝐀𝐜𝐜𝐨𝐮𝐧𝐭 𝐈𝐧𝐟𝐨𝐫𝐦𝐚𝐭𝐢𝐨𝐧:**\n"
+        f"├ 🆔 **ID:** `{user.id}`\n"
+        f"├ 💎 **Credits:** `{db_user[1]}`\n"
+        f"├ 👑 **Role:** `{db_user[2]}`\n"
+        f"└ 🚀 **AI Requests:** `{db_user[3]}`\n\n"
+        f"💡 **Use Commands like:** `/chat`, `/image`, `/script`, `/code`\n"
+        f"▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱"
     )
-    bot.reply_to(message, welcome_text, parse_mode="Markdown")
+    
+    keyboard = [
+        [InlineKeyboardButton("🧠 AI Commands", callback_data='ai_commands')],
+        [InlineKeyboardButton("💰 Buy Credits", callback_data='deposit_info'), InlineKeyboardButton("🎁 Daily Bonus", callback_data='daily_bonus')],
+        [InlineKeyboardButton("🎫 Redeem Code", callback_data='redeem_btn')],
+        [InlineKeyboardButton("👨‍💻 Admin Support", url=f"tg://user?id={ADMIN_ID}")] 
+    ]
+    
+    if update.message: await update.message.reply_text(welcome_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    else: 
+        try: await update.callback_query.message.edit_text(welcome_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        except: pass
 
-@bot.message_handler(commands=['developer', 'dev'])
-def developer_info(message):
-    dev_text = (
-        "👨‍💻 **Developer Information** 👨‍💻\n\n"
-        "**Name:** Ononto Hasan\n"
-        "**TikTok:** [@AURA MINATO](https://www.tiktok.com/@AURA_MINATO)\n"
-        "**Expertise:** Telegram Bot Developer & Freestyle Player\n\n"
-        "💡 _যেকোনো প্রয়োজনে বা নিজের জন্য কাস্টম বট বানাতে চাইলে যোগাযোগ করুন।_"
+async def ai_commands_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🧠 **𝐀𝐈 𝐂𝐎𝐌𝐌𝐀𝐍𝐃𝐒 𝐋𝐈𝐒𝐓**\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔹 `/chat <your message>` - General AI Chat (5 Cr)\n"
+        "🔹 `/script <topic>` - YouTube/TikTok Scripts (10 Cr)\n"
+        "🔹 `/code <prompt>` - Coding & Debugging (10 Cr)\n"
+        "🔹 `/image <prompt>` - Generate HD Images (20 Cr)\n\n"
+        "Example: `/image A futuristic cyber city at night`"
     )
-    bot.reply_to(message, dev_text, parse_mode="Markdown", disable_web_page_preview=True)
+    kb = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data='main_menu')]]
+    await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
-@bot.message_handler(commands=['status'])
-def user_status(message):
-    init_user(message.from_user)
-    user_data = get_user(message.from_user.id)
-    
-    role_badge = "🌟 PREMIUM VIP" if user_data[2] == 'premium' else "👤 FREE USER"
-    
-    status_text = (
-        f"🪪 **ডিজিটাল আইডি কার্ড** 🪪\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 **নাম:** {user_data[0]}\n"
-        f"🛡️ **রোল:** {role_badge}\n"
-        f"🪙 **ব্যালেন্স:** {user_data[1]} Coins\n"
-        f"⚡ **মোট ব্যবহার:** {user_data[3]} বার\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 _আরও কয়েন পেতে /premium মেনু দেখুন।_"
-    )
-    bot.reply_to(message, status_text, parse_mode="Markdown")
+# --- AI COMMANDS ---
 
-@bot.message_handler(commands=['stats'])
-def admin_stats(message):
-    if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "❌ এই কমান্ডটি শুধুমাত্র অ্যাডমিন (Ononto Hasan) ব্যবহার করতে পারবেন।")
-        return
+async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not await check_join(user_id, context): return
     
-    cpu_usage = psutil.cpu_percent(interval=0.5)
-    ram_usage = psutil.virtual_memory().percent
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT COUNT(*) FROM users')
-    total_users = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM users WHERE role = 'premium'")
-    premium_users = cursor.fetchone()[0]
-    free_users = total_users - premium_users
-
-    cursor.execute('SELECT total_queries FROM bot_stats WHERE id = 1')
-    total_queries = cursor.fetchone()[0]
-    
-    cursor.close()
-    conn.close()
-
-    stats_text = (
-        f"👑 **ADMIN DASHBOARD** 👑\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🖥️ **Server Performance:**\n"
-        f"🔹 CPU Usage: {cpu_usage}%\n"
-        f"🔹 RAM Usage: {ram_usage}%\n\n"
-        f"📊 **Bot Database:**\n"
-        f"👥 Total Users: {total_users}\n"
-        f"🌟 Premium Users: {premium_users}\n"
-        f"👤 Free Users: {free_users}\n"
-        f"🚀 Total Queries Processed: {total_queries}\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
-    )
-    bot.reply_to(message, stats_text, parse_mode="Markdown")
-
-@bot.message_handler(commands=['premium', 'buy'])
-def premium_menu(message):
-    payment_info = (
-        "💎 **PREMIUM SUBSCRIPTION** 💎\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "প্যাকেজসমূহ:\n"
-        "🪙 **১০০ কয়েন + প্রিমিয়াম রোল** = ১০০ টাকা\n"
-        "🪙 **৫০০ কয়েন + প্রিমিয়াম রোল** = ৪০০ টাকা\n\n"
-        "💳 **পেমেন্ট অপশন:**\n"
-        "🟢 bKash (Personal): `017XXXXXXXX`\n"
-        "🟠 Nagad (Personal): `017XXXXXXXX`\n"
-        "🟡 Binance Pay ID: `123456789`\n\n"
-        "⚠️ **নিয়মাবলী:** পেমেন্ট সম্পন্ন করার পর ট্রানজেকশন আইডি (TrxID) বা স্ক্রিনশট অ্যাডমিনের কাছে পাঠিয়ে দিন। অ্যাডমিন চেক করে ম্যানুয়ালি আপনার অ্যাকাউন্টে কয়েন যুক্ত করে দেবেন।"
-    )
-    bot.reply_to(message, payment_info, parse_mode="Markdown")
-
-@bot.message_handler(commands=['script', 'chat', 'code'])
-def generate_script(message):
-    init_user(message.from_user)
-    user_id = message.from_user.id
-    prompt = message.text.replace('/script', '').replace('/chat', '').replace('/code', '').strip()
-    
+    prompt = " ".join(context.args)
     if not prompt:
-        bot.reply_to(message, "⚠️ অনুগ্রহ করে টপিক লিখুন।\nউদাহরণ: `/script একটি টেলিগ্রাম বট বানানোর কোড দাও`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Usage: `/chat Hello, how are you?`", parse_mode='Markdown')
         return
 
-    if deduct_coin(user_id):
-        processing_msg = bot.send_message(message.chat.id, "⏳ **DeepSeek AI আপনার উত্তর তৈরি করছে...**", parse_mode="Markdown")
-        try:
-            response = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[
-                    {"role": "system", "content": "You are an expert AI assistant and highly skilled developer. Provide clean, efficient, and well-formatted answers."},
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            reply_text = response.choices[0].message.content
-            current_coins = get_user(user_id)[1]
-            bot.edit_message_text(f"{reply_text}\n\n━━━━━━━━━━━━━━━━━━━━\n🪙 **অবশিষ্ট কয়েন:** {current_coins}", chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode="Markdown")
-        except Exception as e:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute('UPDATE users SET coins = coins + 1 WHERE user_id = %s', (user_id,))
-            conn.commit()
-            cursor.close()
-            conn.close()
-            bot.edit_message_text(f"❌ **সমস্যা হয়েছে:**\n`{e}`\n\n(আপনার কয়েন ফেরত দেওয়া হয়েছে)", chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode="Markdown")
-    else:
-        bot.reply_to(message, "❌ **আপনার ব্যালেন্স শেষ!**\nঅনুগ্রহ করে `/premium` কমান্ড ব্যবহার করে নতুন কয়েন কিনে নিন।", parse_mode="Markdown")
+    db_user = get_user(user_id)
+    if db_user[1] < 5:
+        await update.message.reply_text("❌ Not enough credits! You need 5 Credits for this. Please deposit.")
+        return
 
-@bot.message_handler(commands=['photo', 'image'])
-def generate_photo(message):
-    init_user(message.from_user)
-    user_id = message.from_user.id
-    prompt = message.text.replace('/photo', '').replace('/image', '').strip()
+    msg = await update.message.reply_text("⏳ Thinking...")
+    response = await generate_deepseek_response(prompt)
+    deduct_credits(user_id, 5)
+    await msg.edit_text(f"💡 **DeepSeek:**\n\n{response}", parse_mode='Markdown')
+
+async def ai_script(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not await check_join(user_id, context): return
     
+    prompt = " ".join(context.args)
     if not prompt:
-        bot.reply_to(message, "⚠️ অনুগ্রহ করে ছবির বর্ণনা লিখুন।\nউদাহরণ: `/photo a neon futuristic cyber city`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Usage: `/script A 60-second TikTok video about space travel`", parse_mode='Markdown')
         return
 
-    if deduct_coin(user_id):
-        processing_msg = bot.send_message(message.chat.id, "🎨 **ছবি জেনারেট হচ্ছে, অনুগ্রহ করে কয়েক সেকেন্ড অপেক্ষা করুন...**", parse_mode="Markdown")
-        try:
-            image_url = f"https://image.pollinations.ai/prompt/{prompt}?width=1024&height=1024&nologo=true"
-            response = requests.get(image_url)
-            
-            if response.status_code == 200:
-                image_bytes = BytesIO(response.content)
-                current_coins = get_user(user_id)[1]
-                bot.delete_message(chat_id=message.chat.id, message_id=processing_msg.message_id)
-                bot.send_photo(message.chat.id, image_bytes, caption=f"✨ **আপনার জেনারেট করা ছবি!**\n\n🪙 **অবশিষ্ট কয়েন:** {current_coins}", parse_mode="Markdown")
-            else:
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute('UPDATE users SET coins = coins + 1 WHERE user_id = %s', (user_id,))
-                conn.commit()
-                cursor.close()
-                conn.close()
-                bot.edit_message_text("❌ ছবি জেনারেট করতে ব্যর্থ হয়েছি। (কয়েন ফেরত দেওয়া হয়েছে)", chat_id=message.chat.id, message_id=processing_msg.message_id)
-        except Exception as e:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute('UPDATE users SET coins = coins + 1 WHERE user_id = %s', (user_id,))
-            conn.commit()
-            cursor.close()
-            conn.close()
-            bot.edit_message_text(f"❌ **সমস্যা হয়েছে:** `{e}`\n(কয়েন ফেরত দেওয়া হয়েছে)", chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode="Markdown")
-    else:
-        bot.reply_to(message, "❌ **আপনার ব্যালেন্স শেষ!**\nঅনুগ্রহ করে `/premium` কমান্ড ব্যবহার করে নতুন কয়েন কিনে নিন।", parse_mode="Markdown")
-
-@bot.message_handler(commands=['addcoin'])
-def add_coin_and_premium(message):
-    if message.from_user.id != OWNER_ID:
+    db_user = get_user(user_id)
+    if db_user[1] < 10:
+        await update.message.reply_text("❌ Not enough credits! You need 10 Credits for this.")
         return
+
+    msg = await update.message.reply_text("📝 Writing your script...")
+    sys_prompt = "You are an expert scriptwriter for YouTube and TikTok. Write engaging, viral scripts with visual cues."
+    response = await generate_deepseek_response(prompt, sys_prompt)
+    deduct_credits(user_id, 10)
+    await msg.edit_text(f"🎬 **Your Script:**\n\n{response}", parse_mode='Markdown')
+
+async def ai_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not await check_join(user_id, context): return
+    
+    prompt = " ".join(context.args)
+    if not prompt:
+        await update.message.reply_text("⚠️ Usage: `/code Write a python telegram bot`", parse_mode='Markdown')
+        return
+
+    db_user = get_user(user_id)
+    if db_user[1] < 10:
+        await update.message.reply_text("❌ Not enough credits! You need 10 Credits for this.")
+        return
+
+    msg = await update.message.reply_text("💻 Coding...")
+    sys_prompt = "You are an expert senior programmer. Provide clean, efficient code with minimal explanation."
+    response = await generate_deepseek_response(prompt, sys_prompt)
+    deduct_credits(user_id, 10)
+    await msg.edit_text(f"👨‍💻 **Code Result:**\n\n{response}", parse_mode='Markdown')
+
+async def ai_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not await check_join(user_id, context): return
+    
+    prompt = " ".join(context.args)
+    if not prompt:
+        await update.message.reply_text("⚠️ Usage: `/image A cute cat wearing sunglasses`", parse_mode='Markdown')
+        return
+
+    db_user = get_user(user_id)
+    if db_user[1] < 20:
+        await update.message.reply_text("❌ Not enough credits! You need 20 Credits for Image Generation.")
+        return
+
+    msg = await update.message.reply_text("🎨 Generating high-quality image...")
+    # Using Pollinations AI for free image generation
+    image_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
     
     try:
-        args = message.text.split()
-        target_id = int(args[1])
-        coins_to_add = int(args[2])
-        new_role = args[3].lower() if len(args) > 3 else "free"
-        
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT * FROM users WHERE user_id = %s', (target_id,))
-        if not cursor.fetchone():
-            bot.reply_to(message, "❌ এই ইউজার এখনও বট স্টার্ট করেনি।")
-            cursor.close()
-            conn.close()
-            return
-            
-        cursor.execute('UPDATE users SET coins = coins + %s, role = %s WHERE user_id = %s', (coins_to_add, new_role, target_id))
-        conn.commit()
-        cursor.close()
-        conn.close()
-        
-        updated_data = get_user(target_id)
-        bot.reply_to(message, f"✅ **সফলভাবে যুক্ত হয়েছে!**\nইউজার ID: `{target_id}`\nযুক্ত করা কয়েন: {coins_to_add}\nনতুন রোল: {new_role.capitalize()}", parse_mode="Markdown")
-        bot.send_message(target_id, f"🎉 **অ্যাডমিন আপনাকে নতুন প্যাকেজ দিয়েছেন!**\n\n🪙 **নতুন যুক্ত হওয়া কয়েন:** {coins_to_add}\n🛡️ **আপনার বর্তমান রোল:** {new_role.capitalize()}\n💰 **মোট ব্যালেন্স:** {updated_data[1]} Coins", parse_mode="Markdown")
+        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url, caption=f"🎨 **Prompt:** {prompt}\n\n⚡ Generated by Minato AI", parse_mode='Markdown')
+        deduct_credits(user_id, 20)
+        await msg.delete()
     except Exception as e:
-        bot.reply_to(message, "⚠️ **সঠিক ফরম্যাট:**\n`/addcoin <user_id> <coin_amount> <role>`\n\nউদাহরণ: `/addcoin 12345678 100 premium`", parse_mode="Markdown")
+        await msg.edit_text("❌ Error generating image. Please try a different prompt.")
 
-if __name__ == "__main__":
-    if DATABASE_URL:
-        print("🤖 Setup hocche PostgreSQL Database...")
-        setup_db()
-        print("🚀 Bot is successfully running with updated UI!")
-        bot.polling(non_stop=True, timeout=60, long_polling_timeout=60)
+# --- DAILY BONUS ---
+async def daily_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if not await check_join(user_id, context):
+        await query.answer("❌ Join Channel First!", show_alert=True)
+        return
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT last_claim FROM bonus WHERE user_id=%s", (user_id,))
+    res = c.fetchone()
+    today = date.today()
+    
+    if res and res[0] == today:
+        await query.answer("❌ You already claimed your bonus today! Come back tomorrow.", show_alert=True)
     else:
-        print("❌ ERROR: DATABASE_URL missing!")
+        bonus_amount = random.randint(15, 50)
+        c.execute("UPDATE users SET credits = credits + %s WHERE user_id=%s", (bonus_amount, user_id))
+        if res:
+            c.execute("UPDATE bonus SET last_claim=%s WHERE user_id=%s", (today, user_id))
+        else:
+            c.execute("INSERT INTO bonus (user_id, last_claim) VALUES (%s, %s)", (user_id, today))
+        conn.commit()
+        await query.answer(f"🎉 Awesome! You received {bonus_amount} Free Credits today!", show_alert=True)
+        
+    conn.close()
+    await start(update, context)
+
+
+# --- DEPOSIT INFO & METHOD SELECTION ---
+async def deposit_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "💸 **𝐁𝐔𝐘 𝐀𝐈 𝐂𝐑𝐄𝐃𝐈𝐓𝐒**\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🟢 **Starter Plan:** 50 BDT / $0.50 ➔ 200 Credits\n"
+        "🔵 **Basic Plan:** 100 BDT / $1.00 ➔ 500 Credits\n"
+        "🟣 **Pro Plan:** 300 BDT / $3.00 ➔ 2500 Credits\n"
+        "⚡ **Max Plan:** 1000 BDT / $10.00 ➔ 10,000 Credits\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "👇 **SELECT PAYMENT METHOD:**"
+    )
+    kb = [
+        [InlineKeyboardButton("🟣 Bkash", callback_data='method_bkash'), InlineKeyboardButton("🟠 Nagad", callback_data='method_nagad')],
+        [InlineKeyboardButton("🟡 Binance Pay", callback_data='method_binance')],
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='main_menu')]
+    ]
+    if update.callback_query: 
+        await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+async def payment_method_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    method = query.data.split('_')[1] 
+    
+    context.user_data['deposit_method'] = method
+    context.user_data['waiting_for_proof'] = 'deposit_ss'
+
+    if method == 'bkash':
+        details = f"📱 **Bkash Personal:** `{BKASH_NUMBER}`"
+    elif method == 'nagad':
+        details = f"📱 **Nagad Personal:** `{NAGAD_NUMBER}`"
+    else:
+        details = f"🟡 **Binance Pay ID:** `{BINANCE_PAY_ID}`"
+
+    text = (
+        f"💳 **PAY VIA {method.upper()}**\n\n"
+        f"{details}\n\n"
+        "⚠️ **STEP 1:** Send the money to the details above.\n"
+        "⚠️ **STEP 2:** Send the payment **Screenshot** here."
+    )
+    kb = [[InlineKeyboardButton("🔙 Back to Deposit", callback_data='deposit_info')]]
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+# --- SCREENSHOT LOGS ---
+async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    photo = update.message.photo[-1].file_id
+    state = context.user_data.get('waiting_for_proof')
+    
+    if state == 'deposit_ss':
+        context.user_data['deposit_photo'] = photo
+        context.user_data['waiting_for_proof'] = 'deposit_trxid'
+        await update.message.reply_text(
+            "✅ **Screenshot Received!**\n\n"
+            "📝 Now, please type and send the **Transaction ID (TrxID)** or Binance Order ID."
+        )
+    else:
+        pass
+
+# --- TEXT HANDLER FOR TRXID ---
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = context.user_data.get('waiting_for_proof')
+    if state == 'deposit_trxid':
+        trxid = update.message.text
+        photo = context.user_data.get('deposit_photo')
+        method = context.user_data.get('deposit_method', 'Unknown').upper()
+        user = update.effective_user
+        user_link = f"[{user.first_name}](tg://user?id={user.id})"
+
+        caption = (
+            f"💰 **NEW DEPOSIT REQUEST**\n"
+            f"👤 From: {user_link} (`{user.id}`)\n"
+            f"💳 Method: `{method}`\n"
+            f"🧾 **TrxID:** `{trxid}`\n\n"
+            f"ℹ️ Verify TrxID & Approve:"
+        )
+        keyboard = [
+            [InlineKeyboardButton("Starter (200 Cr)", callback_data=f"pay_{user.id}_200_Starter")],
+            [InlineKeyboardButton("Basic (500 Cr)", callback_data=f"pay_{user.id}_500_Basic")],
+            [InlineKeyboardButton("Pro (2500 Cr)", callback_data=f"pay_{user.id}_2500_Pro")],
+            [InlineKeyboardButton("Ultra (4500 Cr)", callback_data=f"pay_{user.id}_4500_Ultra")],
+            [InlineKeyboardButton("Max (10000 Cr)", callback_data=f"pay_{user.id}_10000_Max")],
+            [InlineKeyboardButton("❌ Reject", callback_data="reject_action")]
+        ]
+        
+        await update.message.reply_text("✅ **Deposit Request Sent!**\nPlease wait for admin approval.")
+        
+        try: 
+            await context.bot.send_photo(chat_id=ADMIN_LOG_ID, photo=photo, caption=caption, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        except Exception as e: 
+            pass
+
+        context.user_data['waiting_for_proof'] = None
+        context.user_data['deposit_photo'] = None
+        context.user_data['deposit_method'] = None
+
+# --- ADMIN ACTIONS ---
+async def admin_log_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id): return
+    data = query.data
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    if data.startswith("pay_"):
+        parts = data.split("_")
+        target_id, amount, plan = int(parts[1]), int(parts[2]), parts[3]
+        c.execute("UPDATE users SET credits = credits + %s, role = %s WHERE user_id=%s", (amount, plan, target_id))
+        conn.commit()
+        await query.answer(f"✅ Approved {plan}!")
+        await query.message.edit_caption(caption=query.message.caption + f"\n\n✅ **APPROVED: {plan}**")
+        try: await context.bot.send_message(target_id, f"✅ **Payment Received!**\nPackage: {plan}\nCredits: +{amount}")
+        except: pass
+        try: await context.bot.send_message(PUBLIC_LOG_ID, f"⚡ **AI CREDITS PURCHASED!**\n👤 User: `{target_id}`\n💎 Plan: `{plan}`", parse_mode='Markdown')
+        except: pass
+
+    elif data == "reject_action":
+        await query.message.delete()
+        
+    conn.close()
+
+# --- ADMIN COMMANDS ---
+async def active_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT full_name, user_id, credits, generated_count FROM users ORDER BY generated_count DESC LIMIT 10")
+    users = c.fetchall()
+    conn.close()
+    if not users:
+        await update.message.reply_text("❌ No active users.")
+        return
+    msg = f"📊 **TOP AI USERS**\n━━━━━━━━━━━━━━━━━━\n"
+    for i, u in enumerate(users, 1):
+        name = u[0] if u[0] else "User"
+        mention = f"[{name}](tg://user?id={u[1]})"
+        msg += f"{i}. {mention} | 💰 {u[2]} | 🚀 **{u[3]}**\n"
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+def generate_minato_code(role_tag="PREMIUM"):
+    part1 = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    part2 = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    return f"MINATO-{part1}-{part2}-{role_tag.upper()}"
+
+async def gen_code_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    try:
+        amt = int(context.args[0])
+        role = context.args[1].upper() if len(context.args) > 1 else "PREMIUM"
+        code = generate_minato_code(role)
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("INSERT INTO codes (code, credit_amount, role_reward, is_redeemed) VALUES (%s,%s,%s,0)", (code, amt, role))
+        conn.commit()
+        conn.close()
+        await update.message.reply_text(f"`{code}`")
+    except: pass
+
+async def add_credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    try:
+        tid, amt = int(context.args[0]), int(context.args[1])
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE users SET credits=credits+%s WHERE user_id=%s", (amt, tid))
+        conn.commit()
+        conn.close()
+        await update.message.reply_text("✅ Done")
+    except: pass
+
+async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        code = context.args[0].strip(); uid = update.effective_user.id
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT * FROM codes WHERE code=%s AND is_redeemed=0", (code,))
+        res = c.fetchone()
+        if res:
+            c.execute("UPDATE codes SET is_redeemed=1 WHERE code=%s", (code,))
+            c.execute("UPDATE users SET credits=credits+%s, role=%s WHERE user_id=%s", (res[1], res[2], uid))
+            conn.commit()
+            await update.message.reply_text(f"✅ Redeemed {res[1]} Cr!")
+            try: await context.bot.send_message(PUBLIC_LOG_ID, f"⚡ **REDEEMED!**\n👤 User: `{uid}`\n💎 Role: `{res[2]}`", parse_mode='Markdown')
+            except: pass
+        else: await update.message.reply_text("❌ Invalid.")
+        conn.close()
+    except: await update.message.reply_text("Usage: `/redeem CODE`")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "🛠 **AI COMMANDS & HELP**\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔹 `/start` - Open the main menu\n"
+        "🔹 `/chat <msg>` - Ask AI anything\n"
+        "🔹 `/image <prompt>` - Generate HD Images\n"
+        "🔹 `/script <topic>` - Write Video Scripts\n"
+        "🔹 `/code <prompt>` - Programming help\n"
+        "🔹 `/redeem <code>` - Redeem credit code\n\n"
+        f"👨‍💻 **Contact Admin:** [Ononto Hasan](tg://user?id={ADMIN_ID})\n"
+        f"🌐 **Facebook:** [Official Profile]({FB_ID_LINK})"
+    )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+# --- MAIN CALLBACK HANDLER ---
+async def btn_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if q.data.startswith(('pay_', 'reject_')): await admin_log_actions(update, context)
+    elif q.data in ['profile', 'main_menu']: await start(update, context)
+    elif q.data == 'ai_commands': await ai_commands_menu(update, context)
+    elif q.data == 'deposit_info': await deposit_info(update, context)
+    elif q.data == 'daily_bonus': await daily_bonus(update, context)
+    elif q.data.startswith('method_'): await payment_method_handler(update, context)
+    elif q.data == 'redeem_btn': await q.answer(); await q.message.reply_text("Type `/redeem CODE`")
+
+def main():
+    print("🤖 MINATO AI Bot Started...")
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command)) 
+    app.add_handler(CommandHandler("chat", ai_chat)) 
+    app.add_handler(CommandHandler("script", ai_script)) 
+    app.add_handler(CommandHandler("code", ai_code)) 
+    app.add_handler(CommandHandler("image", ai_image)) 
+    app.add_handler(CommandHandler("active", active_users_command))
+    app.add_handler(CommandHandler("gencode", gen_code_command))
+    app.add_handler(CommandHandler("addcredit", add_credit_command))
+    app.add_handler(CommandHandler("redeem", redeem_command))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_screenshot))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(btn_handler))
+    app.run_polling()
+
+if __name__ == '__main__':
+    main()
