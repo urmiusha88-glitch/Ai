@@ -2,54 +2,51 @@ import logging
 import psycopg2
 import random
 import string
-import urllib.parse
-import httpx
-from datetime import date
+import psutil
+import platform
+from datetime import date, datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 
 # ======================================================
-# 👇 CONFIGURATION SECTION
+# 👇 CONFIGURATION
 # ======================================================
 TOKEN = "8290942305:AAGFtnKV8P5xk591NejJ5hsKEJ02foiRpEk"
 ADMIN_ID = 6198703244  
-ADMIN_USERNAME = "@minato_namikaze143"  # 👈 আপনার টেলিগ্রাম ইউজারনেম এখানে দিন (@ সহ)
+ADMIN_USERNAME = "@yours_ononto"
 
-# 🤖 API KEYS
-DEEPSEEK_API_KEY = "sk-5da4d6648bbe48158c9dd2ba656ac26d"
-
-# 💰 PAYMENT DETAILS
-BKASH_NUMBER = "01846849460"    
-NAGAD_NUMBER = "01846849460"    
-
-# 🗄️ DATABASE URL
 DATABASE_URL = "postgresql://postgres:hQKBupovepWPRJyTUCiqYrUfEnoeRYYv@trolley.proxy.rlwy.net:36125/railway"
 
-# 🔴 LOG CHANNELS
-ADMIN_LOG_ID = -1003769033152
-PUBLIC_LOG_ID = -1003775622081
+# Membership Durations (Days)
+PLAN_DAYS = {
+    "BRONZE": 3,
+    "SILVER": 5,
+    "GOLD": 7,
+    "PLATINUM": 15,
+    "DIAMOND": 30
+}
 
-# ⚠️ Force Join
-CHANNEL_ID = "@minatologs"
-CHANNEL_INVITE_LINK = "https://t.me/minatologs/2"
+# ======================================================
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-# --- DB HELPERS ---
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, credits INTEGER, role TEXT, generated_count INTEGER DEFAULT 0, full_name TEXT)")
-    c.execute("CREATE TABLE IF NOT EXISTS codes (code TEXT PRIMARY KEY, credit_amount INTEGER, role_reward TEXT, is_redeemed INTEGER DEFAULT 0)")
-    c.execute("CREATE TABLE IF NOT EXISTS bonus (user_id BIGINT PRIMARY KEY, last_claim DATE)")
+    # Updated table with expiry date
+    c.execute('''CREATE TABLE IF NOT EXISTS users 
+                 (user_id BIGINT PRIMARY KEY, credits INTEGER, role TEXT, 
+                  generated_count INTEGER DEFAULT 0, full_name TEXT, 
+                  expiry_date DATE)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS codes 
+                 (code TEXT PRIMARY KEY, credit_amount INTEGER, role_reward TEXT, is_redeemed INTEGER DEFAULT 0)''')
     conn.commit()
     conn.close()
 
 init_db()
 
+# --- HELPERS ---
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
@@ -59,128 +56,145 @@ def get_user(user_id, name="User"):
     c.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
     user = c.fetchone()
     if not user:
-        c.execute("INSERT INTO users (user_id, credits, role, generated_count, full_name) VALUES (%s, 50, 'Free', 0, %s)", (user_id, name))
+        c.execute("INSERT INTO users (user_id, credits, role, generated_count, full_name, expiry_date) VALUES (%s, 50, 'Free', 0, %s, %s)", 
+                  (user_id, name, date.today()))
         conn.commit()
-        user = (user_id, 50, 'Free', 0, name)
+        user = (user_id, 50, 'Free', 0, name, date.today())
     conn.close()
     return user
 
-# --- UI HANDLERS ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- STATUS COMMAND (USER) ---
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    db_user = get_user(user.id, user.first_name)
+    u = get_user(user.id, user.first_name)
     
-    text = (
-        f"✨ **𝐌𝐈𝐍𝐀𝐓𝐎 𝐀𝐈 𝐀𝐒𝐒𝐈𝐒𝐓𝐀𝐍𝐓** ✨\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 **User:** `{user.first_name}`\n"
-        f"💎 **Credits:** `{db_user[1]}`\n"
-        f"👑 **Role:** `{db_user[2]}`\n"
-        f"🚀 **Requests:** `{db_user[3]}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👨‍💻 **Admin:** {ADMIN_USERNAME}\n"
-        f"💡 Use `/help` to see all commands."
-    )
+    # u[5] is expiry_date
+    expiry = u[5]
+    today = date.today()
     
-    kb = [
-        [InlineKeyboardButton("🧠 AI Commands", callback_data='ai_commands')],
-        [InlineKeyboardButton("💰 Buy Credits", callback_data='deposit'), InlineKeyboardButton("🎁 Daily Bonus", callback_data='bonus')],
-        [InlineKeyboardButton("🎫 Redeem Code", callback_data='redeem_ui')],
-        [InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{ADMIN_USERNAME.replace('@','')}")]
-    ]
-    
-    if update.message: await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    else: await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    if expiry < today:
+        membership_status = "❌ Expired / No Membership"
+        remaining_days = 0
+    else:
+        membership_status = f"✅ Premium ({u[2]})"
+        remaining_days = (expiry - today).days
 
-# --- COMMANDS SEPARATION ---
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "📖 **USER COMMANDS**\n"
-        "━━━━━━━━━━━━━━\n"
-        "🔹 `/start` - Open Main Menu\n"
-        "🔹 `/chat <text>` - Ask AI anything (5 Cr)\n"
-        "🔹 `/image <prompt>` - Generate HD Image (20 Cr)\n"
-        "🔹 `/redeem <code>` - Claim your coins\n"
-        "🔹 `/help` - Show this list"
+        f"📊 **𝐘𝐎𝐔𝐑 𝐒𝐓𝐀𝐓𝐔𝐒**\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👤 **Name:** `{u[4]}`\n"
+        f"💰 **Coins:** `{u[1]}`\n"
+        f"👑 **Membership:** `{membership_status}`\n"
+        f"📅 **Expiry Date:** `{expiry}`\n"
+        f"⏳ **Remaining:** `{remaining_days} Days`\n"
+        f"━━━━━━━━━━━━━━━━━━"
     )
     await update.message.reply_text(text, parse_mode='Markdown')
 
-async def admin_cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- STATS COMMAND (ADMIN ONLY) ---
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
+    
+    # Host Performance
+    cpu_usage = psutil.cpu_percent()
+    ram = psutil.virtual_memory()
+    
+    # DB Stats
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    total_users = c.fetchone()[0]
+    c.execute("SELECT SUM(generated_count) FROM users")
+    total_requests = c.fetchone()[0]
+    conn.close()
+
     text = (
-        "🛠 **ADMIN CONTROL PANEL**\n"
-        "━━━━━━━━━━━━━━\n"
-        "🔹 `/gencoins <amt> <role>` - Create redeem code\n"
-        "🔹 `/addcredit <id> <amt>` - Add coins to user\n"
-        "🔹 `/stats` - View bot statistics\n"
-        "📌 *Note: Codes are logged in Admin Group.*"
+        f"🖥 **𝐒𝐄𝐑𝐕𝐄𝐑 & 𝐁𝐎𝐓 𝐒𝐓𝐀𝐓𝐒**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 **Total Users:** `{total_users}`\n"
+        f"🤖 **AI Requests:** `{total_requests}`\n\n"
+        f"⚙️ **System Performance:**\n"
+        f"├ **CPU Usage:** `{cpu_usage}%`\n"
+        f"├ **RAM Usage:** `{ram.percent}%`\n"
+        f"└ **OS:** `{platform.system()}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━"
     )
     await update.message.reply_text(text, parse_mode='Markdown')
 
-# --- COIN GENERATION ---
+# --- GENCOIN (ADMIN) ---
 async def gencoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     try:
         amt = int(context.args[0])
-        role = context.args[1] if len(context.args) > 1 else "Premium"
-        code = f"MINATO-{''.join(random.choices(string.ascii_uppercase + string.digits, k=10))}"
+        plan_type = context.args[1].upper()
+        
+        if plan_type not in PLAN_DAYS:
+            return await update.message.reply_text(f"❌ Invalid Plan! Use: {list(PLAN_DAYS.keys())}")
+
+        code = f"CODE-{''.join(random.choices(string.ascii_uppercase + string.digits, k=12))}"
         
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("INSERT INTO codes (code, credit_amount, role_reward) VALUES (%s, %s, %s)", (code, amt, role))
+        c.execute("INSERT INTO codes (code, credit_amount, role_reward) VALUES (%s, %s, %s)", (code, amt, plan_type))
         conn.commit()
         conn.close()
         
-        await update.message.reply_text(f"✅ **Code Generated!**\n\nCode: `{code}`\nAmount: `{amt}`\nRole: `{role}`", parse_mode='Markdown')
-        await context.bot.send_message(ADMIN_LOG_ID, f"🆕 **New Code Generated**\nBy Admin: {update.effective_user.id}\nCode: `{code}`")
+        await update.message.reply_text(
+            f"🎫 **𝐍𝐄𝐖 𝐂𝐎𝐃𝐄 𝐆𝐄𝐍𝐄𝐑𝐀𝐓𝐄𝐃**\n\n"
+            f"🔑 **Code:** `{code}`\n"
+            f"💰 **Coins:** `{amt}`\n"
+            f"🏆 **Membership:** `{plan_type}`\n"
+            f"⏳ **Validity:** `{PLAN_DAYS[plan_type]} Days`", 
+            parse_mode='Markdown'
+        )
     except:
-        await update.message.reply_text("❌ Usage: `/gencoins 500 VIP`")
+        await update.message.reply_text("❌ Usage: `/gencoins 500 GOLD`")
 
+# --- REDEEM (USER) ---
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args: return await update.message.reply_text("❌ Usage: `/redeem MINATO-CODE`")
-    code = context.args[0].strip()
+    if not context.args: return await update.message.reply_text("❌ Usage: `/redeem CODE-XXXX`")
+    code_text = context.args[0].strip()
     uid = update.effective_user.id
     
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT credit_amount, role_reward FROM codes WHERE code=%s AND is_redeemed=0", (code,))
+    c.execute("SELECT credit_amount, role_reward FROM codes WHERE code=%s AND is_redeemed=0", (code_text,))
     res = c.fetchone()
     
     if res:
-        c.execute("UPDATE codes SET is_redeemed=1 WHERE code=%s", (code,))
-        c.execute("UPDATE users SET credits=credits+%s, role=%s WHERE user_id=%s", (res[0], res[1], uid))
+        amt, plan_type = res[0], res[1]
+        days_to_add = PLAN_DAYS.get(plan_type, 0)
+        
+        # Calculate New Expiry
+        new_expiry = date.today() + timedelta(days=days_to_add)
+        
+        c.execute("UPDATE codes SET is_redeemed=1 WHERE code=%s", (code_text,))
+        c.execute("UPDATE users SET credits=credits+%s, role=%s, expiry_date=%s WHERE user_id=%s", 
+                  (amt, plan_type, new_expiry, uid))
         conn.commit()
-        await update.message.reply_text(f"🎉 **Success!**\nYou received `{res[0]}` credits and `{res[1]}` role.")
+        
+        await update.message.reply_text(
+            f"🎉 **𝐑𝐄𝐃𝐄𝐄𝐌 𝐒𝐔𝐂𝐂𝐄𝐒𝐒𝐅𝐔𝐋**\n\n"
+            f"💎 **Added:** `{amt} Coins`\n"
+            f"👑 **Rank:** `{plan_type} (Premium)`\n"
+            f"📅 **New Expiry:** `{new_expiry}`",
+            parse_mode='Markdown'
+        )
     else:
-        await update.message.reply_text("❌ Invalid or already used code.")
+        await update.message.reply_text("❌ Invalid or used code.")
     conn.close()
 
-# --- CALLBACKS ---
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    if q.data == 'main_menu': await start(update, context)
-    elif q.data == 'ai_commands':
-        await q.message.edit_text("🧠 **AI MENU**\n\n/chat - Text AI\n/image - Gen Image\n/script - Writing", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
-    elif q.data == 'deposit':
-        await q.message.edit_text("💳 **PAYMENT**\n\nBkash/Nagad: `01846849460`\nSend money & send SS here.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
-    elif q.data == 'redeem_ui':
-        await q.answer("Use command: /redeem <code>", show_alert=True)
-
+# --- MAIN SETUP ---
 def main():
     app = Application.builder().token(TOKEN).build()
     
-    # User Handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("start", status_cmd)) # ইউজার স্টার্ট দিলেই স্ট্যাটাস দেখতে পাবে
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("stats", admin_stats))
+    app.add_handler(CommandHandler("gencoins", gencoins))
     app.add_handler(CommandHandler("redeem", redeem))
     
-    # Admin Handlers
-    app.add_handler(CommandHandler("cmds", admin_cmds))
-    app.add_handler(CommandHandler("gencoins", gencoins))
-    
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    
-    print("Minato Bot is Running...")
+    print("Minato Professional Bot is Running...")
     app.run_polling()
 
 if __name__ == '__main__':
