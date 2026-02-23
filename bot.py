@@ -3,11 +3,10 @@ import psycopg2
 import random
 import string
 import psutil
-import platform
 import urllib.parse
 import httpx
 import re
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 
@@ -23,14 +22,19 @@ DATABASE_URL = "postgresql://postgres:hQKBupovepWPRJyTUCiqYrUfEnoeRYYv@trolley.p
 
 BKASH_NUMBER = "01846849460"
 NAGAD_NUMBER = "01846849460"
-ADMIN_LOG_ID = -1003769033152
-PUBLIC_LOG_ID = -1003775622081
 CHANNEL_ID = "@minatologs"
 CHANNEL_INVITE_LINK = "https://t.me/minatologs/2"
 
-PLAN_DAYS = {"BRONZE": 3, "SILVER": 5, "GOLD": 7, "PLATINUM": 15, "DIAMOND": 30}
+# Plans config exactly as you requested
+PLAN_DAYS = {"BRONZE": 3, "SILVER": 5, "GOLD": 7, "PLATINIAM": 15, "DIAMOND": 30}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+active_chats = set()
+
+# --- TIMEZONE FIX (BANGLADESH TIME) ---
+def get_bd_time():
+    return datetime.utcnow() + timedelta(hours=6)
 
 # --- DATABASE ENGINE ---
 def get_db_conn():
@@ -40,23 +44,21 @@ def init_db():
     conn = get_db_conn()
     c = conn.cursor()
     
-    # 1. Create table if it doesn't exist completely
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (user_id BIGINT PRIMARY KEY, credits INTEGER DEFAULT 0, role TEXT DEFAULT 'Free', 
-                 generated_count INTEGER DEFAULT 0, full_name TEXT, expiry_date DATE DEFAULT CURRENT_DATE)''')
+                 generated_count INTEGER DEFAULT 0, full_name TEXT, expiry_date TIMESTAMP)''')
     
-    # 2. FORCE FIX: Add missing columns if table existed from old code
     try:
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS credits INTEGER DEFAULT 0")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'Free'")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS generated_count INTEGER DEFAULT 0")
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS expiry_date DATE DEFAULT CURRENT_DATE")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS expiry_date TIMESTAMP")
+        c.execute("ALTER TABLE users ALTER COLUMN expiry_date TYPE TIMESTAMP USING expiry_date::TIMESTAMP")
         conn.commit()
-    except Exception as e:
-        conn.rollback() # Ignores error if columns already exist
+    except Exception:
+        conn.rollback() 
         
-    # 3. Code Table
     c.execute('''CREATE TABLE IF NOT EXISTS codes 
                  (code TEXT PRIMARY KEY, credit_amount INTEGER, role_reward TEXT, is_redeemed INTEGER DEFAULT 0)''')
     
@@ -67,7 +69,6 @@ def init_db():
         conn.rollback()
         
     conn.close()
-    print("✅ Database Structure Fixed & Synchronized!")
 
 init_db()
 
@@ -78,10 +79,11 @@ def get_user(user_id, name="User"):
     c.execute("SELECT user_id, credits, role, generated_count, full_name, expiry_date FROM users WHERE user_id=%s", (user_id,))
     user = c.fetchone()
     if not user:
+        bd_time = get_bd_time()
         c.execute("INSERT INTO users (user_id, credits, role, generated_count, full_name, expiry_date) VALUES (%s, 50, 'Free', 0, %s, %s)", 
-                  (user_id, name, date.today()))
+                  (user_id, name, bd_time))
         conn.commit()
-        user = (user_id, 50, 'Free', 0, name, date.today())
+        user = (user_id, 50, 'Free', 0, name, bd_time)
     conn.close()
     return user
 
@@ -92,18 +94,24 @@ async def check_join(user_id, context):
     except:
         return True
 
-# --- AI API ---
-async def ask_ai(prompt):
+async def ask_ai(prompt, user_name="User"):
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    data = {"model": "deepseek-chat", "messages": [{"role": "system", "content": "Helpful AI"}, {"role": "user", "content": prompt}]}
-    async with httpx.AsyncClient() as client:
+    system_msg = f"You are Minato AI. The user's name talking to you is {user_name}. Be friendly."
+    data = {
+        "model": "deepseek-chat", 
+        "messages": [
+            {"role": "system", "content": system_msg}, 
+            {"role": "user", "content": prompt}
+        ]
+    }
+    async with httpx.AsyncClient(timeout=60.0) as client:
         try:
-            r = await client.post("https://api.deepseek.com/chat/completions", json=data, headers=headers, timeout=60)
+            r = await client.post("https://api.deepseek.com/chat/completions", json=data, headers=headers)
             return r.json()['choices'][0]['message']['content']
-        except:
+        except Exception:
             return "❌ Server Busy. Pare abar try korun."
 
-# --- START UI ---
+# --- UI & STATUS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not await check_join(user.id, context):
@@ -113,7 +121,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         u = get_user(user.id, user.first_name)
         expiry = u[5]
-        status = f"✅ Premium ({u[2]})" if expiry > date.today() else "🆓 Free"
+        status = f"✅ Premium ( {u[2]} )" if isinstance(expiry, datetime) and expiry > get_bd_time() else "🆓 Free"
         
         text = (
             f"🤖 **𝐌𝐈𝐍𝐀𝐓𝐎 𝐀𝐈 𝐀𝐒𝐒𝐈𝐒𝐓𝐀𝐍𝐓**\n"
@@ -121,11 +129,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 **User:** `{u[4]}`\n"
             f"💎 **Coins:** `{u[1]}`\n"
             f"👑 **Rank:** `{status}`\n"
-            f"📅 **Expiry:** `{expiry}`\n"
             f"━━━━━━━━━━━━━━━━━━"
         )
         kb = [
-            [InlineKeyboardButton("🧠 AI Menu", callback_data='ai_menu')],
+            [InlineKeyboardButton("👤 My Status", callback_data='my_status'), InlineKeyboardButton("🧠 AI Menu", callback_data='ai_menu')],
             [InlineKeyboardButton("💰 Buy Credits", callback_data='deposit'), InlineKeyboardButton("🎫 Redeem", callback_data='redeem_ui')]
         ]
         
@@ -136,49 +143,149 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Start Error: {e}")
 
-# --- AI COMMANDS ---
-async def ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cmd = update.message.text.split()[0].replace('/', '')
-    prompt = " ".join(context.args)
-    if not prompt:
-        return await update.message.reply_text(f"Usage: `/{cmd} your prompt`", parse_mode='Markdown')
+# /status Command
+async def user_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    u = get_user(user.id, user.first_name)
+    expiry = u[5]
+    
+    if isinstance(expiry, datetime) and expiry > get_bd_time():
+        status_text = f"Premium ( {u[2]} )"
+        exp_str = expiry.strftime("%d %B %Y, %I:%M %p")
+    else:
+        status_text = "Free"
+        exp_str = "None/Expired"
 
-    u = get_user(update.effective_user.id)
-    cost = 20 if cmd in ['image', 'photo'] else 5
+    text = (
+        f"👤 **APNAR PROFILE STATUS** 👤\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💎 **Coins:** `{u[1]}`\n"
+        f"👑 **Membership:** `{status_text}`\n"
+        f"📅 **Expiration Date:** `{exp_str}`\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
+    if update.message:
+        await update.message.reply_text(text, parse_mode='Markdown')
+    elif update.callback_query:
+        await update.callback_query.message.edit_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
+
+# --- CHAT & IMAGE ---
+async def process_ai_message(update: Update, prompt: str):
+    user = update.effective_user
+    u = get_user(user.id, user.first_name)
+    cost = 1 
     
     if u[1] < cost:
-        return await update.message.reply_text("❌ Not enough Credits! Please buy more.")
+        if user.id in active_chats: active_chats.remove(user.id)
+        return await update.message.reply_text("❌ Not enough Credits! Chat mode off hoye geche.")
 
     m = await update.message.reply_text("⏳ Thinking...")
-    if cmd in ['image', 'photo']:
-        url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
-        await update.message.reply_photo(url, caption="🎨 **Enjoy our AI! 🎉**", parse_mode='Markdown')
-        await m.delete()
-    else:
-        res = await ask_ai(prompt)
-        await m.edit_text(f"{res}\n\n⚡ **Enjoy our AI! 🎉**", parse_mode='Markdown')
+    res = await ask_ai(prompt, user.first_name)
+    
+    await m.edit_text(f"{res}\n\n_(Chat off korte /stop likhun)_", parse_mode='Markdown')
     
     conn = get_db_conn()
     c = conn.cursor()
-    c.execute("UPDATE users SET credits=credits-%s WHERE user_id=%s", (cost, u[0]))
+    c.execute("UPDATE users SET credits=credits-%s, generated_count=generated_count+1 WHERE user_id=%s", (cost, u[0]))
+    conn.commit()
+    conn.close()
+
+async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    prompt = " ".join(context.args)
+    active_chats.add(user_id)
+    if not prompt:
+        await update.message.reply_text("✅ **Chat Mode ON!**\nEkhon theke apni normal message dilei AI uttor dibe. Thamate chaile `/stop` likhun.", parse_mode='Markdown')
+        return
+    await process_ai_message(update, prompt)
+
+async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in active_chats:
+        active_chats.remove(user_id)
+        await update.message.reply_text("🛑 **Chat mode stopped.**\nAbar suru korte `/chat` likhun.", parse_mode='Markdown')
+    else:
+        await update.message.reply_text("Apni toh ekhon chat mode e nai. Suru korte `/chat` likhun.")
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in active_chats:
+        await process_ai_message(update, update.message.text)
+
+async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    prompt = " ".join(context.args)
+    if not prompt:
+        return await update.message.reply_text("Usage: `/image apnar prompt`", parse_mode='Markdown')
+
+    u = get_user(update.effective_user.id)
+    cost = 20 
+    
+    if u[1] < cost:
+        return await update.message.reply_text("❌ Not enough Credits for Image! Please buy more.")
+
+    m = await update.message.reply_text("🎨 Drawing your photo... Please wait.")
+    
+    try:
+        url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}?width=1024&height=1024&nologo=true"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(url)
+            if response.status_code == 200:
+                await update.message.reply_photo(photo=response.content, caption="🎨 **Apnar Image!**", parse_mode='Markdown')
+                await m.delete()
+            else:
+                return await m.edit_text("❌ Image api error. Photo generate korte pareni.")
+    except Exception:
+        return await m.edit_text("❌ Error generating image.")
+        
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute("UPDATE users SET credits=credits-%s, generated_count=generated_count+1 WHERE user_id=%s", (cost, u[0]))
     conn.commit()
     conn.close()
 
 # --- ADMIN STATS ---
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    cpu, ram = psutil.cpu_percent(), psutil.virtual_memory().percent
-    await update.message.reply_text(f"🖥 **SERVER STATS**\nCPU: {cpu}% | RAM: {ram}%")
-
-# --- GEN & REDEEM FIX ---
-async def gencoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return await update.message.reply_text("❌ Only admins can use this command.")
     
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*), SUM(generated_count) FROM users")
+    res = c.fetchone()
+    total_users = res[0] or 0
+    total_activities = res[1] or 0
+    
+    c.execute("SELECT COUNT(*) FROM users WHERE role != 'Free'")
+    premium_users = c.fetchone()[0] or 0
+    conn.close()
+    
+    cpu = psutil.cpu_percent()
+    ram = psutil.virtual_memory().percent
+    
+    text = (
+        f"📊 **ADMIN STATS & PERFORMANCE**\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👥 **Total Users:** `{total_users}`\n"
+        f"💎 **Premium Users:** `{premium_users}`\n"
+        f"🔄 **Total User Activities:** `{total_activities}`\n\n"
+        f"🖥 **HOST DETAILS**\n"
+        f"⚙️ **CPU Usage:** `{cpu}%`\n"
+        f"💾 **RAM Usage:** `{ram}%`\n"
+    )
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+# --- GEN & REDEEM FIXES ---
+async def gencoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
     try:
-        amt = int(context.args[0])
-        plan = context.args[1].upper() if len(context.args) > 1 else "BRONZE"
-        code = f"CODE-{''.join(random.choices(string.ascii_uppercase + string.digits, k=10))}"
+        plan = context.args[0].upper()
+        if plan not in PLAN_DAYS:
+            return await update.message.reply_text("❌ Valid plans: BRONZE, SILVER, GOLD, PLATINIAM, DIAMOND")
+            
+        amt = int(context.args[1]) if len(context.args) > 1 else 100
+        
+        # Generator: CODE-XXXXXXXXXXXXXX (14 Chars exact)
+        random_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=14))
+        code = f"CODE-{random_str}"
         
         conn = get_db_conn()
         c = conn.cursor()
@@ -186,23 +293,22 @@ async def gencoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
         
-        await update.message.reply_text(f"🎫 **New Code Generated:** `{code}`\nPlan: {plan}\nCoins: {amt}\n\n💡 Reply to this message with `/redeem` to claim!", parse_mode='Markdown')
-    except Exception as e:
-        await update.message.reply_text("❌ Usage: `/gencoins 500 GOLD`", parse_mode='Markdown')
+        # format: CODE-XXXXXXXXXXXXXX ( GOLD )
+        await update.message.reply_text(f"🎫 **New Code Generated:**\n\n`{code}` ( {plan} )\n\nCoins: {amt}\n💡 Reply to this message with `/redeem` to claim!", parse_mode='Markdown')
+    except Exception:
+        await update.message.reply_text("❌ Usage: `/gencoin GOLD 500` ba `/gencoin SILVER 200`", parse_mode='Markdown')
 
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code_text = None
-    
     if update.message.reply_to_message and update.message.reply_to_message.text:
-        match = re.search(r'CODE-[A-Z0-9]+', update.message.reply_to_message.text)
-        if match:
-            code_text = match.group(0)
+        match = re.search(r'CODE-[A-Z0-9]{14}', update.message.reply_to_message.text)
+        if match: code_text = match.group(0)
             
     if not code_text and context.args:
         code_text = context.args[0].strip()
 
     if not code_text:
-        return await update.message.reply_text("❌ Kono code e reply kore `/redeem` likhun ba `/redeem CODE-XXXX` likhun.", parse_mode='Markdown')
+        return await update.message.reply_text("❌ Kono code e reply kore `/redeem` likhun ba `/redeem CODE-XXXX...` likhun.", parse_mode='Markdown')
 
     conn = get_db_conn()
     c = conn.cursor()
@@ -211,13 +317,23 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if res:
         amt, plan = res[0], res[1]
-        new_expiry = date.today() + timedelta(days=PLAN_DAYS.get(plan, 1))
+        
+        # BD Time e exact expiration time!
+        new_expiry = get_bd_time() + timedelta(days=PLAN_DAYS.get(plan, 1))
+        exp_formatted = new_expiry.strftime("%d %B %Y, %I:%M %p")
         
         c.execute("UPDATE codes SET is_redeemed = 1 WHERE code=%s", (code_text,))
         c.execute("UPDATE users SET credits=credits+%s, role=%s, expiry_date=%s WHERE user_id=%s", (amt, plan, new_expiry, update.effective_user.id))
         conn.commit()
         
-        await update.message.reply_text(f"🎉 **Redeem Successful!**\n💎 {amt} Coins Added.\n👑 Rank: {plan}\n\n⚡ **Enjoy our AI! 🎉**", parse_mode='Markdown')
+        await update.message.reply_text(
+            f"🎉 **Redeem Successful!**\n"
+            f"💎 Coins Added: `{amt}`\n"
+            f"👑 Membership: Premium ( {plan} )\n"
+            f"📅 Exact Expiry: `{exp_formatted}`\n\n"
+            f"⚡ **Enjoy our AI! 🎉**", 
+            parse_mode='Markdown'
+        )
     else:
         await update.message.reply_text("❌ Invalid dekhacche! Ei code ta bhul ba already use kora hoye geche.")
         
@@ -230,23 +346,31 @@ async def handle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if q.data == 'main_menu':
         await start(update, context)
+    elif q.data == 'my_status':
+        await user_status(update, context)
     elif q.data == 'ai_menu':
-        await q.message.edit_text("💡 **AI Commands:**\n`/chat [prompt]`\n`/image [prompt]`\n`/script [prompt]`\n`/code [prompt]`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
+        await q.message.edit_text("💡 **AI Commands:**\n`/chat` - Continuous Chat On\n`/stop` - Chat Off\n`/image [prompt]` - Create Image", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
     elif q.data == 'deposit':
-        await q.message.edit_text(f"💳 **Payment Info:**\nBkash/Nagad (Personal): `{BKASH_NUMBER}`\n\nPayment kore admin er sathe jogajog korun: {ADMIN_USERNAME}", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
+        await q.message.edit_text(f"💳 **Payment Info:**\nBkash/Nagad: `{BKASH_NUMBER}`\n\nPayment kore admin er sathe jogajog korun: {ADMIN_USERNAME}", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
     elif q.data == 'redeem_ui':
         await q.message.edit_text("🎫 **Redeem System:**\nKono code e reply kore `/redeem` likhun, othoba `/redeem CODE-XXXX` format e command din.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
 
 def main():
     app = Application.builder().token(TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler(["chat", "image", "photo", "script", "code"], ai_handler))
+    app.add_handler(CommandHandler("status", user_status))
+    app.add_handler(CommandHandler(["chat", "script", "code"], chat_command))
+    app.add_handler(CommandHandler("stop", stop_chat))
+    app.add_handler(CommandHandler(["image", "photo"], image_handler))
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CommandHandler(["gencoins", "gencoin"], gencoins))
     app.add_handler(CommandHandler("redeem", redeem))
+    
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_cb))
     
-    print("🤖 Bot is fixed, running without errors!")
+    print("🤖 Bot is successfully running with Bangladesh Timezone and perfectly formatted Codes!")
     app.run_polling()
 
 if __name__ == '__main__':
