@@ -11,52 +11,52 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 
 # ======================================================
-# 👇 CONFIGURATION
+# 👇 CONFIGURATION (সব ডিটেইলস এখানে)
 # ======================================================
 TOKEN = "8290942305:AAGFtnKV8P5xk591NejJ5hsKEJ02foiRpEk"
 ADMIN_ID = 6198703244  
 ADMIN_USERNAME = "@yours_ononto"
 
-DATABASE_URL = "postgresql://postgres:hQKBupovepWPRJyTUCiqYrUfEnoeRYYv@trolley.proxy.rlwy.net:36125/railway"
+# 🤖 API KEYS
+DEEPSEEK_API_KEY = "sk-5da4d6648bbe48158c9dd2ba656ac26d"
 
-PLAN_DAYS = {
-    "BRONZE": 3, "SILVER": 5, "GOLD": 7, "PLATINUM": 15, "DIAMOND": 30
-}
+# 💰 PAYMENT & CHANNELS
+BKASH_NUMBER = "01846849460"    
+NAGAD_NUMBER = "01846849460"    
+DATABASE_URL = "postgresql://postgres:hQKBupovepWPRJyTUCiqYrUfEnoeRYYv@trolley.proxy.rlwy.net:36125/railway"
+ADMIN_LOG_ID = -1003769033152
+PUBLIC_LOG_ID = -1003775622081
+CHANNEL_ID = "@minatologs"
+CHANNEL_INVITE_LINK = "https://t.me/minatologs/2"
+
+# Membership Durations
+PLAN_DAYS = {"BRONZE": 3, "SILVER": 5, "GOLD": 7, "PLATINUM": 15, "DIAMOND": 30}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- DB HELPERS ---
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
-
+# --- DATABASE INIT & FIX ---
 def init_db():
-    conn = get_db_connection()
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    # ১. ইউজার টেবিল চেক ও তৈরি
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (user_id BIGINT PRIMARY KEY, credits INTEGER DEFAULT 0, role TEXT DEFAULT 'Free', 
-                  generated_count INTEGER DEFAULT 0, full_name TEXT, 
-                  expiry_date DATE DEFAULT CURRENT_DATE)''')
-    
-    # ২. কলাম মিসিং থাকলে তা অ্যাড করা (যাতে ওই এরর আর না আসে)
+                  generated_count INTEGER DEFAULT 0, full_name TEXT, expiry_date DATE DEFAULT CURRENT_DATE)''')
+    # Missing Column Fixer
     try:
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS generated_count INTEGER DEFAULT 0")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS expiry_date DATE DEFAULT CURRENT_DATE")
-        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
-    except:
-        pass # ইতিমধ্যে থাকলে এরর এড়িয়ে যাবে
-
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'Free'")
+    except: pass
     c.execute('''CREATE TABLE IF NOT EXISTS codes 
                  (code TEXT PRIMARY KEY, credit_amount INTEGER, role_reward TEXT, is_redeemed INTEGER DEFAULT 0)''')
     conn.commit()
     conn.close()
-    print("✅ Database Tables Fixed & Synchronized!")
 
 init_db()
 
-# --- GET USER HELPER ---
+# --- HELPERS ---
 def get_user(user_id, name="User"):
-    conn = get_db_connection()
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute("SELECT user_id, credits, role, generated_count, full_name, expiry_date FROM users WHERE user_id=%s", (user_id,))
     user = c.fetchone()
@@ -64,107 +64,135 @@ def get_user(user_id, name="User"):
         c.execute("INSERT INTO users (user_id, credits, role, generated_count, full_name, expiry_date) VALUES (%s, 50, 'Free', 0, %s, %s)", 
                   (user_id, name, date.today()))
         conn.commit()
-        # রিটার্ন করার সময় ইনডেক্স ঠিক রাখা
         user = (user_id, 50, 'Free', 0, name, date.today())
     conn.close()
     return user
 
-# --- STATUS COMMAND ---
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    u = get_user(user.id, user.first_name)
-    
-    # u[5] এখন expiry_date হিসেবে কাজ করবে
-    expiry = u[5]
-    today = date.today()
-    
-    if expiry <= today and u[2] != 'Free':
-        status_text = "❌ Expired"
-        days_left = 0
-    else:
-        status_text = f"✅ Premium ({u[2]})" if u[2] != 'Free' else "🆓 Free User"
-        days_left = (expiry - today).days if expiry > today else 0
+async def check_join(user_id, context):
+    try:
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        return member.status not in ['left', 'kicked']
+    except: return True
 
+# --- AI API ---
+async def ask_ai(prompt, system="You are a helpful AI."):
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+    data = {"model": "deepseek-chat", "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.post("https://api.deepseek.com/chat/completions", json=data, headers=headers, timeout=60)
+            return r.json()['choices'][0]['message']['content']
+        except: return "❌ AI Server Busy. Try again."
+
+# --- MAIN START UI ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not await check_join(user.id, context):
+        await update.message.reply_text("❌ Join @minatologs First!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Join", url=CHANNEL_INVITE_LINK)]]))
+        return
+
+    u = get_user(user.id, user.first_name)
+    expiry = u[5]
+    status = f"✅ {u[2]}" if expiry > date.today() else "🆓 Free"
+    
     text = (
-        f"📊 **𝐘𝐎𝐔𝐑 𝐒𝐓𝐀𝐓𝐔𝐒**\n"
+        f"🤖 **𝐌𝐈𝐍𝐀𝐓𝐎 𝐀𝐈 𝐀𝐒𝐒𝐈𝐒𝐓𝐀𝐍𝐓**\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"👤 **Name:** `{u[4]}`\n"
-        f"💰 **Coins:** `{u[1]}`\n"
-        f"👑 **Rank:** `{status_text}`\n"
+        f"👤 **User:** `{u[4]}`\n"
+        f"💎 **Coins:** `{u[1]}`\n"
+        f"👑 **Membership:** `{status}`\n"
         f"📅 **Expiry:** `{expiry}`\n"
-        f"⏳ **Left:** `{max(0, days_left)} Days`\n"
         f"━━━━━━━━━━━━━━━━━━"
     )
-    await update.message.reply_text(text, parse_mode='Markdown')
+    kb = [
+        [InlineKeyboardButton("🧠 AI Menu", callback_data='ai_menu')],
+        [InlineKeyboardButton("💰 Buy Credits", callback_data='deposit'), InlineKeyboardButton("🎁 Bonus", callback_data='bonus')],
+        [InlineKeyboardButton("🎫 Redeem Code", callback_data='redeem_ui')],
+        [InlineKeyboardButton("📞 Support", url=f"https://t.me/{ADMIN_USERNAME.replace('@','')}")]
+    ]
+    
+    if update.message: await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    else: await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 # --- ADMIN STATS ---
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    
-    cpu = psutil.cpu_percent()
-    ram = psutil.virtual_memory().percent
-    
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM users")
-    total_u = c.fetchone()[0]
-    c.execute("SELECT SUM(generated_count) FROM users")
-    total_req = c.fetchone()[0] or 0
+    cpu, ram = psutil.cpu_percent(), psutil.virtual_memory().percent
+    conn = psycopg2.connect(DATABASE_URL); c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users"); total_u = c.fetchone()[0]
     conn.close()
+    await update.message.reply_text(f"🖥 **STATS**\nUsers: {total_u}\nCPU: {cpu}% | RAM: {ram}%")
 
-    text = (
-        f"🖥 **𝐒𝐄𝐑𝐕𝐄𝐑 𝐒𝐓𝐀𝐓𝐒**\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"👥 Users: `{total_u}`\n"
-        f"🚀 Total Req: `{total_req}`\n"
-        f"🔥 CPU: `{cpu}%` | RAM: `{ram}%`"
-    )
-    await update.message.reply_text(text, parse_mode='Markdown')
+# --- AI COMMANDS ---
+async def chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = get_user(update.effective_user.id)
+    if u[1] < 5: return await update.message.reply_text("❌ Need 5 Coins!")
+    prompt = " ".join(context.args)
+    if not prompt: return await update.message.reply_text("Usage: /chat <msg>")
+    m = await update.message.reply_text("⏳ Thinking...")
+    res = await ask_ai(prompt)
+    conn = psycopg2.connect(DATABASE_URL); c = conn.cursor()
+    c.execute("UPDATE users SET credits=credits-5, generated_count=generated_count+1 WHERE user_id=%s", (u[0],))
+    conn.commit(); conn.close()
+    await m.edit_text(res)
 
-# --- GENCOIN (ADMIN) ---
+async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = get_user(update.effective_user.id)
+    if u[1] < 20: return await update.message.reply_text("❌ Need 20 Coins!")
+    prompt = " ".join(context.args)
+    if not prompt: return await update.message.reply_text("Usage: /image <prompt>")
+    url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
+    await update.message.reply_photo(url, caption=f"🎨 {prompt}")
+    conn = psycopg2.connect(DATABASE_URL); c = conn.cursor()
+    c.execute("UPDATE users SET credits=credits-20, generated_count=generated_count+1 WHERE user_id=%s", (u[0],))
+    conn.commit(); conn.close()
+
+# --- COIN GEN & REDEEM ---
 async def gencoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     try:
-        amt = int(context.args[0])
-        plan = context.args[1].upper()
-        if plan not in PLAN_DAYS: return await update.message.reply_text("Plan: BRONZE, SILVER, GOLD, PLATINUM, DIAMOND")
-
+        amt, plan = int(context.args[0]), context.args[1].upper()
         code = f"CODE-{''.join(random.choices(string.ascii_uppercase + string.digits, k=10))}-{plan}"
-        conn = get_db_connection()
-        c = conn.cursor()
+        conn = psycopg2.connect(DATABASE_URL); c = conn.cursor()
         c.execute("INSERT INTO codes (code, credit_amount, role_reward) VALUES (%s, %s, %s)", (code, amt, plan))
         conn.commit(); conn.close()
-        await update.message.reply_text(f"✅ Code: `{code}`\nCoins: {amt}\nPlan: {plan}")
-    except:
-        await update.message.reply_text("Usage: `/gencoins 500 GOLD`")
+        await update.message.reply_text(f"✅ Generated: `{code}`")
+    except: await update.message.reply_text("Usage: /gencoins 500 GOLD")
 
-# --- REDEEM ---
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return
-    code_text = context.args[0].strip()
-    conn = get_db_connection(); c = conn.cursor()
-    c.execute("SELECT credit_amount, role_reward FROM codes WHERE code=%s AND is_redeemed=0", (code_text,))
+    code = context.args[0].strip()
+    conn = psycopg2.connect(DATABASE_URL); c = conn.cursor()
+    c.execute("SELECT credit_amount, role_reward FROM codes WHERE code=%s AND is_redeemed=0", (code,))
     res = c.fetchone()
-    
     if res:
-        amt, plan = res[0], res[1]
-        new_expiry = date.today() + timedelta(days=PLAN_DAYS[plan])
-        c.execute("UPDATE codes SET is_redeemed=1 WHERE code=%s", (code_text,))
-        c.execute("UPDATE users SET credits=credits+%s, role=%s, expiry_date=%s WHERE user_id=%s", (amt, plan, new_expiry, update.effective_user.id))
+        new_expiry = date.today() + timedelta(days=PLAN_DAYS.get(res[1], 1))
+        c.execute("UPDATE codes SET is_redeemed=1 WHERE code=%s", (code,))
+        c.execute("UPDATE users SET credits=credits+%s, role=%s, expiry_date=%s WHERE user_id=%s", (res[0], res[1], new_expiry, update.effective_user.id))
         conn.commit()
-        await update.message.reply_text(f"🎉 Redeemed! {amt} coins & {plan} membership added.")
-    else:
-        await update.message.reply_text("❌ Invalid Code.")
+        await update.message.reply_text(f"🎉 Redeemed {res[0]} Coins & {res[1]} Rank!")
+    else: await update.message.reply_text("❌ Invalid Code.")
     conn.close()
 
-# --- MAIN ---
+# --- CALLBACKS ---
+async def handle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if q.data == 'main_menu': await start(update, context)
+    elif q.data == 'ai_menu':
+        await q.message.edit_text("💡 **AI COMMANDS**\n\n/chat <msg>\n/image <prompt>\n/script <topic>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
+    elif q.data == 'deposit':
+        await q.message.edit_text(f"💳 **PAYMENT**\n\nBkash/Nagad: `{BKASH_NUMBER}`\nSend SS & TrxID here.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]))
+
 def main():
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", status_cmd))
-    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", start))
+    app.add_handler(CommandHandler("chat", chat_cmd))
+    app.add_handler(CommandHandler("image", image_cmd))
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CommandHandler("gencoins", gencoins))
     app.add_handler(CommandHandler("redeem", redeem))
+    app.add_handler(CallbackQueryHandler(handle_cb))
     app.run_polling()
 
 if __name__ == '__main__':
