@@ -32,7 +32,7 @@ PLAN_COINS = {"BRONZE": 100, "SILVER": 500, "GOLD": 2000, "PLATINIAM": 5000, "DI
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-active_chats = set()
+active_chats = {}
 MAINTENANCE_MODE = False
 
 # --- TIMEZONE FIX (BANGLADESH TIME) ---
@@ -50,7 +50,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (user_id BIGINT PRIMARY KEY, credits INTEGER DEFAULT 0, role TEXT DEFAULT 'Free', 
                  generated_count INTEGER DEFAULT 0, full_name TEXT, expiry_date TIMESTAMP,
-                 is_admin INTEGER DEFAULT 0, is_banned INTEGER DEFAULT 0)''')
+                 is_admin INTEGER DEFAULT 0, is_banned INTEGER DEFAULT 0, last_claim_date TIMESTAMP)''')
     
     try:
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS credits INTEGER DEFAULT 0")
@@ -60,6 +60,7 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS expiry_date TIMESTAMP")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin INTEGER DEFAULT 0")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_claim_date TIMESTAMP")
         c.execute("ALTER TABLE users ALTER COLUMN expiry_date TYPE TIMESTAMP USING expiry_date::TIMESTAMP")
         conn.commit()
     except Exception:
@@ -82,14 +83,14 @@ init_db()
 def get_user(user_id, name="User"):
     conn = get_db_conn()
     c = conn.cursor()
-    c.execute("SELECT user_id, credits, role, generated_count, full_name, expiry_date, is_admin, is_banned FROM users WHERE user_id=%s", (user_id,))
+    c.execute("SELECT user_id, credits, role, generated_count, full_name, expiry_date, is_admin, is_banned, last_claim_date FROM users WHERE user_id=%s", (user_id,))
     user = c.fetchone()
     if not user:
         bd_time = get_bd_time()
-        c.execute("INSERT INTO users (user_id, credits, role, generated_count, full_name, expiry_date, is_admin, is_banned) VALUES (%s, 50, 'Free', 0, %s, %s, 0, 0)", 
+        c.execute("INSERT INTO users (user_id, credits, role, generated_count, full_name, expiry_date, is_admin, is_banned, last_claim_date) VALUES (%s, 50, 'Free', 0, %s, %s, 0, 0, NULL)", 
                   (user_id, name, bd_time))
         conn.commit()
-        user = (user_id, 50, 'Free', 0, name, bd_time, 0, 0)
+        user = (user_id, 50, 'Free', 0, name, bd_time, 0, 0, None)
     conn.close()
     return user
 
@@ -119,7 +120,17 @@ async def check_join(user_id, context):
 
 async def ask_ai(prompt, user_name="User"):
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    system_msg = f"You are Minato AI. The user's name talking to you is {user_name}. Be friendly."
+    
+    system_msg = (
+        f"You are Minato AI, an advanced AI assistant created by Ononto Hasan. "
+        f"The user's name talking to you is {user_name}. "
+        f"CRITICAL LANGUAGE RULE: Always detect the underlying language of any Romanized input and ALWAYS respond in the proper native script of that language. "
+        f"This applies globally to ALL languages. If the user types in Romanized Bengali/Banglish (e.g., 'kemon aso'), you MUST reply in proper Bengali script (বাংলা). "
+        f"If Romanized Hindi/Hinglish, reply in proper Hindi script (हिंदी). "
+        f"If the user types in English, reply in English. "
+        f"Never reply in Romanized/Latin formats for languages that have their own native scripts. Be friendly and helpful."
+    )
+    
     data = {
         "model": "deepseek-chat", 
         "messages": [
@@ -142,7 +153,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if check_banned(user.id): return await update.message.reply_text("❌ You are banned from using this bot.")
     
     if MAINTENANCE_MODE and not check_admin(user.id):
-        return await update.message.reply_text("🛠 **Bot is under maintenance.** Ekhon update cholche, kichukhon por abar try korun.", parse_mode='Markdown')
+        return await update.message.reply_text("🛠 *𝗦𝗬𝗦𝗧𝗘𝗠 𝗠𝗔𝗜𝗡𝗧𝗘𝗡𝗔𝗡𝗖𝗘 𝗔𝗟𝗘𝗥𝗧*\nThe bot is currently undergoing scheduled maintenance. Please check back later.", parse_mode='Markdown')
     
     if not await check_join(user.id, context):
         await update.message.reply_text("❌ Join @minatologs First!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Join", url=CHANNEL_INVITE_LINK)]]))
@@ -153,7 +164,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         expiry = u[5]
         is_owner = (user.id == OWNER_ID)
         
-        # Owner Check
         if is_owner:
             status = "👑 Owner"
             coins_display = "Unlimited ♾️"
@@ -172,9 +182,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👑 **Rank:** `{status}`\n"
             f"━━━━━━━━━━━━━━━━━━"
         )
+        
         kb = [
-            [InlineKeyboardButton("👤 My Status", callback_data='my_status'), InlineKeyboardButton("🧠 AI Menu", callback_data='ai_menu')],
-            [InlineKeyboardButton("💰 Buy Credits", callback_data='deposit'), InlineKeyboardButton("🎫 Redeem", callback_data='redeem_ui')]
+            [InlineKeyboardButton("👤 My Status", callback_data='my_status'), InlineKeyboardButton("🎁 Daily Claim", callback_data='daily_claim')],
+            [InlineKeyboardButton("🧠 AI Menu", callback_data='ai_menu'), InlineKeyboardButton("💰 Buy Credits", callback_data='deposit')],
+            [InlineKeyboardButton("🎫 Redeem", callback_data='redeem_ui')]
         ]
         
         if update.message:
@@ -194,8 +206,31 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 `/stop` - Stop Continuous Chat\n"
         "🔹 `/image <prompt>` - Generate Image using AI\n"
         "🔹 `/redeem <code>` - Claim premium/coins\n"
+        "🔹 `/report <msg>` - Send a bug report/suggestion to Admin\n"
     )
     await update.message.reply_text(text, parse_mode='Markdown')
+
+async def report_bug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if check_banned(user.id): return
+    
+    msg = " ".join(context.args)
+    if not msg:
+        return await update.message.reply_text("❌ Please likhun apni ki janate chan.\n**Usage:** `/report chat e problem hocche` ba kono suggestion.", parse_mode='Markdown')
+        
+    report_text = (
+        f"🚨 **NEW REPORT / SUGGESTION** 🚨\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👤 **From:** {user.first_name} (`{user.id}`)\n"
+        f"💬 **Message:** {msg}\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
+    
+    try:
+        await context.bot.send_message(OWNER_ID, report_text, parse_mode='Markdown')
+        await update.message.reply_text("✅ Apnar message sothik vabe Owner er kache send kora hoyeche. Dhonnobad!", parse_mode='Markdown')
+    except Exception:
+        await update.message.reply_text("❌ Owner ke message pathate somossa hoyeche.")
 
 async def user_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -238,23 +273,32 @@ async def process_ai_message(update: Update, prompt: str):
     if check_banned(user.id): return
     
     if MAINTENANCE_MODE and not check_admin(user.id):
-        return await update.message.reply_text("🛠 **Bot is under maintenance.** Kichukhon por try korun.", parse_mode='Markdown')
+        return await update.message.reply_text("🛠 *𝗦𝗬𝗦𝗧𝗘𝗠 𝗠𝗔𝗜𝗡𝗧𝗘𝗡𝗔𝗡𝗖𝗘 𝗔𝗟𝗘𝗥𝗧*\nThe bot is currently undergoing scheduled maintenance. Please check back later.", parse_mode='Markdown')
     
     u = get_user(user.id, user.first_name)
     cost = 2 
     is_owner = (user.id == OWNER_ID)
     
-    # Check for credits only if not owner
     if not is_owner and u[1] < cost:
-        if user.id in active_chats: active_chats.remove(user.id)
+        if user.id in active_chats: 
+            del active_chats[user.id]
         return await update.message.reply_text("❌ Not enough Credits! Chat mode off hoye geche.")
 
     m = await update.message.reply_text("⏳ Thinking...")
     res = await ask_ai(prompt, user.first_name)
     
-    await m.edit_text(res, parse_mode='Markdown')
+    if user.id in active_chats and not active_chats[user.id].get("greeted", True):
+        intro_text = (
+            f"👋 Hello **{user.first_name}**!\n"
+            f"🤖 I am Minato AI, created by **Ononto Hasan**.\n"
+            f"🔗 [FB: Ononto Hasan](https://www.facebook.com/yours.ononto)\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+        )
+        res = intro_text + res
+        active_chats[user.id]["greeted"] = True 
     
-    # Deduct credits only if not owner
+    await m.edit_text(res, parse_mode='Markdown', disable_web_page_preview=True)
+    
     conn = get_db_conn()
     c = conn.cursor()
     if not is_owner:
@@ -268,7 +312,9 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if check_banned(user_id): return
     prompt = " ".join(context.args)
-    active_chats.add(user_id) 
+    
+    if user_id not in active_chats:
+        active_chats[user_id] = {"greeted": False}
     
     if not prompt:
         await update.message.reply_text("✅ **Chat Mode ON!**\nEkhon theke apni normal message dilei AI uttor dibe. Thamate chaile `/stop` likhun.", parse_mode='Markdown')
@@ -278,7 +324,7 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in active_chats:
-        active_chats.remove(user_id)
+        del active_chats[user_id]
         await update.message.reply_text("🛑 **Chat mode stopped.**\nAbar suru korte `/chat` likhun.", parse_mode='Markdown')
     else:
         await update.message.reply_text("Apni toh ekhon chat mode e nai. Suru korte `/chat` likhun.")
@@ -294,7 +340,7 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if check_banned(user_id): return
     
     if MAINTENANCE_MODE and not check_admin(user_id):
-        return await update.message.reply_text("🛠 **Bot is under maintenance.** Kichukhon por try korun.", parse_mode='Markdown')
+        return await update.message.reply_text("🛠 *𝗦𝗬𝗦𝗧𝗘𝗠 𝗠𝗔𝗜𝗡𝗧𝗘𝗡𝗔𝗡𝗖𝗘 𝗔𝗟𝗘𝗥𝗧*\nThe bot is currently undergoing scheduled maintenance. Please check back later.", parse_mode='Markdown')
     
     prompt = " ".join(context.args)
     if not prompt:
@@ -344,12 +390,12 @@ async def admin_cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 `/unban <id>` or `/unban_user <id>` - Unban user\n"
         "🔹 `/admins` - View list of admins\n"
         "🔹 `/broadcast <text>` - Send msg to all users\n"
-        "🔹 `/gencoins <PLAN> [amount]` - Gen code (amount optional)\n\n"
+        "🔹 `/gencoins <PLAN> [amount]` - Gen code\n\n"
         "👑 **OWNER EXCLUSIVE COMMANDS** 👑\n"
         "🔸 `/add_admin <id>` - Make a user admin\n"
         "🔸 `/ban_admin <id>` - Remove admin role\n"
-        "🔸 `/maintenance on/off` - Toggle maintenance mode\n"
-        "🔸 `/setplan <id> <plan>` - Give direct premium\n"
+        "🔸 `/maintenance on/off [msg]` - Auto alert to all users\n"
+        "🔸 `/setplan <id> <plan>` - Direct premium\n"
         "🔸 `/removecoin <id> <amount>` - Deduct coins\n"
         "🔸 `/userlist` - Download all users database\n"
     )
@@ -466,9 +512,7 @@ async def gencoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if plan not in PLAN_DAYS:
             return await update.message.reply_text("❌ Valid plans: BRONZE, SILVER, GOLD, PLATINIAM, DIAMOND")
             
-        # Amount check - Jodi apni alada amount den tahole oita nibe, na hole automatic plan coins nibe
         amt = int(context.args[1]) if len(context.args) > 1 else PLAN_COINS[plan]
-        
         random_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=14))
         code = f"CODE-{random_str}"
         
@@ -529,18 +573,80 @@ async def view_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for a in admins: text += f"- {a[1]} (`{a[0]}`)\n"
     await update.message.reply_text(text, parse_mode='Markdown')
 
+# --- PROFESSIONAL ENGLISH MAINTENANCE COMMAND ---
 async def toggle_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
     global MAINTENANCE_MODE
-    state = context.args[0].lower() if context.args else None
+    
+    if not context.args:
+        return await update.message.reply_text("Usage:\n`/maintenance on`\n`/maintenance off added claim button, fixed bug, improved speed`", parse_mode='Markdown')
+        
+    state = context.args[0].lower()
+    
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users WHERE is_banned=0")
+    users = c.fetchall()
+    conn.close()
+
     if state == "on":
         MAINTENANCE_MODE = True
-        await update.message.reply_text("🛠 **Maintenance Mode ON.** General users ar bot use korte parbe na.", parse_mode='Markdown')
+        await update.message.reply_text("🛠 **Maintenance Mode ON.** Broadcasting English alert to users...", parse_mode='Markdown')
+        
+        msg = (
+            "🛠 *𝗦𝗬𝗦𝗧𝗘𝗠 𝗠𝗔𝗜𝗡𝗧𝗘𝗡𝗔𝗡𝗖𝗘 𝗔𝗟𝗘𝗥𝗧* 🛠\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Dear Users,\n"
+            "Our bot is currently undergoing scheduled maintenance to bring you a better and faster experience.\n\n"
+            "⏳ *Status:* Offline for Upgrades\n"
+            "⚙️ *Reason:* Core System Updates & Feature Additions\n\n"
+            "Please bear with us. You will be automatically notified once the system is back online. Thank you for your patience! ❤️"
+        )
+        
+        success = 0
+        for u in users:
+            try:
+                await context.bot.send_message(u[0], msg, parse_mode='Markdown')
+                success += 1
+            except: pass
+        await update.message.reply_text(f"✅ Maintenance ON message sent to {success} users.")
+        
     elif state == "off":
         MAINTENANCE_MODE = False
-        await update.message.reply_text("✅ **Maintenance Mode OFF.** Bot is running normally.", parse_mode='Markdown')
+        
+        # Format update notes automatically
+        if len(context.args) > 1:
+            updates_raw = " ".join(context.args[1:])
+            # Split sentences by comma or dot to create automatic bullet points
+            updates_list = [u.strip() for u in re.split(r'[,|.]', updates_raw) if u.strip()]
+            updates_formatted = "\n".join([f"▪️ {u.capitalize()}" for u in updates_list])
+        else:
+            # Default professional update notes if owner types nothing
+            updates_formatted = (
+                "▪️ Core system performance optimized.\n"
+                "▪️ Minor bug fixes for smoother chats.\n"
+                "▪️ Server response time improved."
+            )
+            
+        msg = (
+            "✅ *𝗦𝗬𝗦𝗧𝗘𝗠 𝗢𝗡𝗟𝗜𝗡𝗘 & 𝗨𝗣𝗗𝗔𝗧𝗘𝗗* ✅\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Great news! The maintenance is complete and the bot is now fully operational.\n\n"
+            "🚀 *𝗪𝗵𝗮𝘁'𝘀 𝗡𝗲𝘄 & 𝗙𝗶𝘅𝗲𝗱:*\n"
+            f"{updates_formatted}\n\n"
+            "Enjoy the newly improved AI experience! Type /start to continue."
+        )
+        
+        await update.message.reply_text("✅ **Maintenance Mode OFF.** Broadcasting English updates to users...", parse_mode='Markdown')
+        success = 0
+        for u in users:
+            try:
+                await context.bot.send_message(u[0], msg, parse_mode='Markdown')
+                success += 1
+            except: pass
+        await update.message.reply_text(f"✅ Maintenance OFF message sent to {success} users.")
     else:
-        await update.message.reply_text("Usage: `/maintenance on` ba `/maintenance off`", parse_mode='Markdown')
+        await update.message.reply_text("Usage:\n`/maintenance on`\n`/maintenance off added premium, fixed bugs`", parse_mode='Markdown')
 
 async def remove_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
@@ -646,8 +752,36 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    
     if q.data == 'main_menu':
         await start(update, context)
+        
+    elif q.data == 'daily_claim':
+        user_id = update.effective_user.id
+        if check_banned(user_id): return
+        
+        conn = get_db_conn()
+        c = conn.cursor()
+        c.execute("SELECT last_claim_date FROM users WHERE user_id=%s", (user_id,))
+        res = c.fetchone()
+        
+        now = get_bd_time()
+        last_claim = res[0] if res else None
+        
+        if last_claim is None or (now - last_claim) >= timedelta(hours=24):
+            c.execute("UPDATE users SET credits=credits+50, last_claim_date=%s WHERE user_id=%s", (now, user_id))
+            conn.commit()
+            await q.answer("🎉 50 Coins claimed successfully!", show_alert=True)
+            await start(update, context)
+        else:
+            diff = timedelta(hours=24) - (now - last_claim)
+            total_seconds = int(diff.total_seconds())
+            hours, remainder = divmod(total_seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
+            await q.answer(f"⏳ Please wait {hours} hours and {minutes} minutes before claiming again.", show_alert=True)
+            
+        conn.close()
+        
     elif q.data == 'my_status':
         await user_status(update, context)
     elif q.data == 'ai_menu':
@@ -664,6 +798,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", user_status))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("report", report_bug))
     app.add_handler(CommandHandler(["chat", "script", "code"], chat_command))
     app.add_handler(CommandHandler("stop", stop_chat))
     app.add_handler(CommandHandler(["image", "photo"], image_handler))
@@ -691,7 +826,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_cb))
     
-    print("🤖 Bot is SUPERCHARGED with Infinite Owner Status & Giveaway fix!")
+    print("🤖 Bot is completely ready with Professional English Maintenance System!")
     app.run_polling()
 
 if __name__ == '__main__':
