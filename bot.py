@@ -151,13 +151,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         u = get_user(user.id, user.first_name)
         expiry = u[5]
-        status = f"✅ Premium ( {u[2]} )" if isinstance(expiry, datetime) and expiry > get_bd_time() else "🆓 Free"
+        is_owner = (user.id == OWNER_ID)
+        
+        # Owner Check
+        if is_owner:
+            status = "👑 Owner"
+            coins_display = "Unlimited ♾️"
+        elif isinstance(expiry, datetime) and expiry > get_bd_time():
+            status = f"✅ Premium ( {u[2]} )"
+            coins_display = f"`{u[1]}`"
+        else:
+            status = "🆓 Free"
+            coins_display = f"`{u[1]}`"
         
         text = (
             f"🤖 **𝐌𝐈𝐍𝐀𝐓𝐎 𝐀𝐈 𝐀𝐒𝐒𝐈𝐒𝐓𝐀𝐍𝐓**\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"👤 **User:** `{u[4]}`\n"
-            f"💎 **Coins:** `{u[1]}`\n"
+            f"💎 **Coins:** {coins_display}\n"
             f"👑 **Rank:** `{status}`\n"
             f"━━━━━━━━━━━━━━━━━━"
         )
@@ -191,20 +202,27 @@ async def user_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if check_banned(user.id): return
     u = get_user(user.id, user.first_name)
     expiry = u[5]
+    is_owner = (user.id == OWNER_ID)
     
-    if isinstance(expiry, datetime) and expiry > get_bd_time():
+    if is_owner:
+        status_text = "👑 Owner"
+        exp_str = "`Lifetime ♾️`"
+        coins_display = "`Unlimited ♾️`"
+    elif isinstance(expiry, datetime) and expiry > get_bd_time():
         status_text = f"Premium ( {u[2]} )"
-        exp_str = expiry.strftime("%d %B %Y, %I:%M %p")
+        exp_str = f"`{expiry.strftime('%d %B %Y, %I:%M %p')}`"
+        coins_display = f"`{u[1]}`"
     else:
         status_text = "Free"
-        exp_str = "None/Expired"
+        exp_str = "`None/Expired`"
+        coins_display = f"`{u[1]}`"
 
     text = (
         f"👤 **APNAR PROFILE STATUS** 👤\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"💎 **Coins:** `{u[1]}`\n"
+        f"💎 **Coins:** {coins_display}\n"
         f"👑 **Membership:** `{status_text}`\n"
-        f"📅 **Expiration Date:** `{exp_str}`\n"
+        f"📅 **Expiration Date:** {exp_str}\n"
         f"━━━━━━━━━━━━━━━━━━"
     )
     if update.message:
@@ -224,8 +242,10 @@ async def process_ai_message(update: Update, prompt: str):
     
     u = get_user(user.id, user.first_name)
     cost = 2 
+    is_owner = (user.id == OWNER_ID)
     
-    if u[1] < cost:
+    # Check for credits only if not owner
+    if not is_owner and u[1] < cost:
         if user.id in active_chats: active_chats.remove(user.id)
         return await update.message.reply_text("❌ Not enough Credits! Chat mode off hoye geche.")
 
@@ -234,9 +254,13 @@ async def process_ai_message(update: Update, prompt: str):
     
     await m.edit_text(res, parse_mode='Markdown')
     
+    # Deduct credits only if not owner
     conn = get_db_conn()
     c = conn.cursor()
-    c.execute("UPDATE users SET credits=credits-%s, generated_count=generated_count+1 WHERE user_id=%s", (cost, u[0]))
+    if not is_owner:
+        c.execute("UPDATE users SET credits=credits-%s, generated_count=generated_count+1 WHERE user_id=%s", (cost, u[0]))
+    else:
+        c.execute("UPDATE users SET generated_count=generated_count+1 WHERE user_id=%s", (u[0],))
     conn.commit()
     conn.close()
 
@@ -278,7 +302,9 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     u = get_user(user_id)
     cost = 20 
-    if u[1] < cost:
+    is_owner = (user_id == OWNER_ID)
+    
+    if not is_owner and u[1] < cost:
         return await update.message.reply_text("❌ Not enough Credits for Image! Please buy more.")
 
     m = await update.message.reply_text("🎨 Drawing your photo... Please wait.")
@@ -297,7 +323,10 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     conn = get_db_conn()
     c = conn.cursor()
-    c.execute("UPDATE users SET credits=credits-%s, generated_count=generated_count+1 WHERE user_id=%s", (cost, u[0]))
+    if not is_owner:
+        c.execute("UPDATE users SET credits=credits-%s, generated_count=generated_count+1 WHERE user_id=%s", (cost, u[0]))
+    else:
+        c.execute("UPDATE users SET generated_count=generated_count+1 WHERE user_id=%s", (u[0],))
     conn.commit()
     conn.close()
 
@@ -315,7 +344,7 @@ async def admin_cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 `/unban <id>` or `/unban_user <id>` - Unban user\n"
         "🔹 `/admins` - View list of admins\n"
         "🔹 `/broadcast <text>` - Send msg to all users\n"
-        "🔹 `/gencoins <PLAN>` - Gen code (amount auto set)\n\n"
+        "🔹 `/gencoins <PLAN> [amount]` - Gen code (amount optional)\n\n"
         "👑 **OWNER EXCLUSIVE COMMANDS** 👑\n"
         "🔸 `/add_admin <id>` - Make a user admin\n"
         "🔸 `/ban_admin <id>` - Remove admin role\n"
@@ -437,8 +466,8 @@ async def gencoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if plan not in PLAN_DAYS:
             return await update.message.reply_text("❌ Valid plans: BRONZE, SILVER, GOLD, PLATINIAM, DIAMOND")
             
-        # Automatic coin amount based on plan
-        amt = PLAN_COINS[plan]
+        # Amount check - Jodi apni alada amount den tahole oita nibe, na hole automatic plan coins nibe
+        amt = int(context.args[1]) if len(context.args) > 1 else PLAN_COINS[plan]
         
         random_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=14))
         code = f"CODE-{random_str}"
@@ -451,7 +480,7 @@ async def gencoins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(f"🎫 **New Code Generated:**\n\n`{code}` ( {plan} )\n\nCoins: {amt}\n💡 Reply to this message with `/redeem` to claim!", parse_mode='Markdown')
     except Exception:
-        await update.message.reply_text("❌ Usage: `/gencoin GOLD` ba `/gencoin SILVER`", parse_mode='Markdown')
+        await update.message.reply_text("❌ Usage: `/gencoin GOLD` ba custom giveaway er jonno `/gencoin GOLD 500`", parse_mode='Markdown')
 
 # ======================================================
 # OWNER ONLY COMMANDS
@@ -538,7 +567,7 @@ async def set_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await update.message.reply_text("❌ Valid plans: BRONZE, SILVER, GOLD, PLATINIAM, DIAMOND")
             
         new_expiry = get_bd_time() + timedelta(days=PLAN_DAYS.get(plan, 1))
-        added_coins = PLAN_COINS[plan] # Automatic coins based on plan
+        added_coins = PLAN_COINS[plan] 
         
         conn = get_db_conn()
         c = conn.cursor()
@@ -662,7 +691,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_cb))
     
-    print("🤖 Bot is SUPERCHARGED with Fixed Plan Coins!")
+    print("🤖 Bot is SUPERCHARGED with Infinite Owner Status & Giveaway fix!")
     app.run_polling()
 
 if __name__ == '__main__':
