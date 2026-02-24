@@ -65,7 +65,7 @@ st.markdown("""
     .auth-box {
         background: linear-gradient(145deg, #2a2a2a, #242424);
         padding: 40px; border-radius: 16px; border: 1px solid #3d3d3d;
-        text-align: center; width: 100%; max-width: 450px; margin: auto;
+        text-align: center; width: 100%; max-width: 480px; margin: auto;
         box-shadow: 0 10px 30px rgba(0,0,0,0.5);
     }
     
@@ -104,7 +104,6 @@ if not st.session_state.logged_in:
     st.markdown("<h1 style='font-size: 2.5rem; color: #10a37f; margin-bottom: 0;'>⚡ Minato AI</h1>", unsafe_allow_html=True)
     st.markdown("<p style='color:#9CA3AF; margin-bottom: 5px;'>Intelligent • Fast • Secure</p>", unsafe_allow_html=True)
     
-    # 🔴 Contact Buttons
     st.markdown("""
         <div class="contact-btns">
             <a href="https://www.facebook.com/yours.ononto" target="_blank" class="c-btn fb-btn">📘 Facebook</a>
@@ -112,14 +111,15 @@ if not st.session_state.logged_in:
         </div>
     """, unsafe_allow_html=True)
     
-    tab1, tab2 = st.tabs(["🔐 Login", "📝 Register"])
+    # 🔴 3 Tabs for better UX
+    tab1, tab2, tab3 = st.tabs(["🔐 Web Login", "✈️ Telegram Login", "📝 Register"])
     
     with tab1:
-        st.markdown("### Log into your account")
+        st.markdown("### Web Account Login")
         l_user = st.text_input("Username", value=st.session_state.reg_success_user, key="login_u")
         l_pass = st.text_input("Password", type="password", key="login_p")
         
-        if st.button("Login"):
+        if st.button("Login", key="btn_web_login"):
             if not l_user or not l_pass:
                 st.error("Please fill all fields.")
             else:
@@ -136,12 +136,36 @@ if not st.session_state.logged_in:
                     st.error("❌ Invalid Username or Password.")
                     
     with tab2:
+        st.markdown("### Bot User Login")
+        st.markdown("<p style='color:#9CA3AF; font-size:14px; margin-top:-10px;'>Login directly with your Telegram ID.</p>", unsafe_allow_html=True)
+        tg_id_input = st.text_input("Telegram ID", placeholder="e.g. 6198703244", type="password", key="login_tg")
+        
+        if st.button("Login via Telegram", key="btn_tg_login"):
+            if not tg_id_input:
+                st.error("Please enter your Telegram ID.")
+            else:
+                try:
+                    user_id = int(tg_id_input.strip())
+                    user_db = get_user_data_by_id(user_id)
+                    if user_db:
+                        if user_db[5] == 1: 
+                            st.error("❌ You are banned.")
+                        else:
+                            st.session_state.logged_in = True
+                            st.session_state.user_data = user_db
+                            st.rerun()
+                    else:
+                        st.error("❌ ID not found! Start the Telegram bot first.")
+                except ValueError:
+                    st.error("❌ Invalid ID format. Must be numbers only.")
+
+    with tab3:
         st.markdown("### Create New Account")
         r_user = st.text_input("Choose Username", key="reg_u")
         r_pass = st.text_input("Password", type="password", key="reg_p")
         r_cpass = st.text_input("Re-enter Password", type="password", key="reg_cp")
         
-        if st.button("Register"):
+        if st.button("Register", key="btn_register"):
             if not r_user or not r_pass or not r_cpass:
                 st.error("Please fill all fields.")
             elif r_pass != r_cpass:
@@ -153,15 +177,14 @@ if not st.session_state.logged_in:
                 if c.fetchone():
                     st.error("❌ Username already taken! Please choose another.")
                 else:
-                    # Create new user
-                    new_id = random.randint(1000000000, 9999999999) # Unique Web ID
+                    new_id = random.randint(1000000000, 9999999999) 
                     now = get_bd_time()
                     hashed_p = hash_password(r_pass)
                     c.execute("INSERT INTO users (user_id, credits, role, generated_count, full_name, expiry_date, is_admin, is_banned, username, password) VALUES (%s, 50, 'Free', 0, %s, %s, 0, 0, %s, %s)", 
                               (new_id, r_user.strip(), now, r_user.strip(), hashed_p))
                     conn.commit()
                     st.session_state.reg_success_user = r_user.strip()
-                    st.success("✅ Registration Successful! Please login from the Login tab.")
+                    st.success("✅ Registration Successful! Please switch to 'Web Login' tab to enter.")
                 conn.close()
 
     st.markdown("</div></div>", unsafe_allow_html=True)
@@ -194,7 +217,6 @@ with st.sidebar:
             
     st.divider()
     
-    # 🔴 Redeem Code Section
     with st.expander("🎫 Redeem Code"):
         r_code = st.text_input("Enter Code", label_visibility="collapsed", placeholder="CODE-XXXXX")
         if st.button("Claim"):
