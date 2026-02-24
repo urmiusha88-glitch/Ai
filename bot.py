@@ -17,7 +17,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 TOKEN = "8290942305:AAGFtnKV8P5xk591NejJ5hsKEJ02foiRpEk"
 OWNER_ID = 6198703244  
 ADMIN_USERNAME = "@yours\_ononto"  
-WEBAPP_URL = "http://3.101.134.189:8080" # Apnar Web App URL (Railway URL hole ekhane boshaben)
+WEBAPP_URL = "https://charismatic-compassion-production.up.railway.app/" # Apnar Web App URL (Railway URL hole ekhane boshaben)
 
 DEEPSEEK_API_KEY = "sk-5da4d6648bbe48158c9dd2ba656ac26d"
 DATABASE_URL = "postgresql://postgres:hQKBupovepWPRJyTUCiqYrUfEnoeRYYv@trolley.proxy.rlwy.net:36125/railway"
@@ -412,3 +412,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
