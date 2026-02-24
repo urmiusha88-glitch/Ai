@@ -138,7 +138,7 @@ if not st.session_state.logged_in:
     with tab2:
         st.markdown("### Bot User Login")
         st.markdown("<p style='color:#9CA3AF; font-size:14px; margin-top:-10px;'>Login directly with your Telegram ID.</p>", unsafe_allow_html=True)
-        tg_id_input = st.text_input("Telegram ID", placeholder="e.g. 6198703244", type="password", key="login_tg")
+        tg_id_input = st.text_input("Telegram ID", placeholder="e.g. 61987xxxxx", type="password", key="login_tg")
         
         if st.button("Login via Telegram", key="btn_tg_login"):
             if not tg_id_input:
@@ -367,3 +367,4 @@ if user_input := st.chat_input("Ask Minato anything..."):
     
     st.session_state.messages.append({"role": "assistant", "content": bot_reply})
     st.rerun()
+
