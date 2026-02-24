@@ -1,0 +1,7 @@
+python-telegram-bot==22.6
+pyTelegramBotAPI
+streamlit
+requests
+psycopg2-binary
+psutil
+openai
