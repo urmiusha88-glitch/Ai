@@ -17,7 +17,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 TOKEN = "8290942305:AAGFtnKV8P5xk591NejJ5hsKEJ02foiRpEk"
 OWNER_ID = 6198703244  
 ADMIN_USERNAME = "@yours\_ononto"  
-WEBAPP_URL = "https://charismatic-compassion-production.up.railway.app/" # Apnar Web App URL (Railway URL hole ekhane boshaben)
+WEBAPP_URL = "http://3.101.134.189:8080" # Apnar Web App URL
 
 DEEPSEEK_API_KEY = "sk-5da4d6648bbe48158c9dd2ba656ac26d"
 DATABASE_URL = "postgresql://postgres:hQKBupovepWPRJyTUCiqYrUfEnoeRYYv@trolley.proxy.rlwy.net:36125/railway"
@@ -52,7 +52,7 @@ def init_db():
                  (user_id BIGINT PRIMARY KEY, credits INTEGER DEFAULT 0, role TEXT DEFAULT 'Free', 
                  generated_count INTEGER DEFAULT 0, full_name TEXT, expiry_date TIMESTAMP,
                  is_admin INTEGER DEFAULT 0, is_banned INTEGER DEFAULT 0, last_claim_date TIMESTAMP,
-                 session_expiry TIMESTAMP)''')
+                 session_expiry TIMESTAMP, username TEXT UNIQUE, password TEXT)''')
     try:
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS credits INTEGER DEFAULT 0")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
@@ -63,7 +63,8 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned INTEGER DEFAULT 0")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_claim_date TIMESTAMP")
         c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS session_expiry TIMESTAMP")
-        c.execute("ALTER TABLE users ALTER COLUMN expiry_date TYPE TIMESTAMP USING expiry_date::TIMESTAMP")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT UNIQUE")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password TEXT")
         conn.commit()
     except Exception:
         conn.rollback() 
@@ -122,9 +123,9 @@ async def ask_ai(prompt, user_name="User"):
     system_msg = (
         f"You are Minato AI, an advanced AI assistant created by Ononto Hasan. "
         f"The user's name talking to you is {user_name}. "
-        f"CRITICAL LANGUAGE RULE: Always detect the underlying language of any Romanized input and ALWAYS respond in the proper native script of that language. "
-        f"If Romanized Bengali/Banglish (e.g., 'kemon aso'), reply in Bengali script (বাংলা). "
-        f"If Romanized Hindi/Hinglish, reply in Hindi script (हिंदी). If English, reply in English."
+        f"CRITICAL LANGUAGE RULE: Always respond in the proper native script of the detected language. "
+        f"If Romanized Bengali/Banglish, reply in Bengali script (বাংলা). "
+        f"If English, reply in English."
     )
     data = {"model": "deepseek-chat", "messages": [{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}]}
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -228,7 +229,7 @@ async def user_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔰 *Membership:* `{status_text}`\n"
         f"📅 *Expiry Date:* {exp_str}\n"
         f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-        f"*(Use your Telegram ID to login to our WebApp)*"
+        f"*(You can also use our WebApp for a better experience)*"
     )
     if update.message:
         await update.message.reply_text(text, parse_mode='Markdown')
@@ -248,13 +249,12 @@ async def process_ai_message(update: Update, prompt: str):
     is_owner = (user.id == OWNER_ID)
     now = get_bd_time()
     
-    # ⏱️ Session Logic Check
     session_cost = 50
     has_active_session = False
     
     if is_owner:
         has_active_session = True
-    elif u[9] and now < u[9]: # u[9] is session_expiry
+    elif u[9] and now < u[9]: 
         has_active_session = True
         
     conn = get_db_conn()
@@ -266,7 +266,6 @@ async def process_ai_message(update: Update, prompt: str):
             if user.id in active_chats: del active_chats[user.id]
             return await update.message.reply_text("❌ Not enough Coins for a 10-minute session! (Costs 50 coins).\nPlease claim daily reward or buy coins.")
         else:
-            # Deduct coins and start 10 min session
             new_expiry = now + timedelta(minutes=10)
             c.execute("UPDATE users SET credits=credits-%s, session_expiry=%s WHERE user_id=%s", (session_cost, new_expiry, u[0]))
             conn.commit()
@@ -286,7 +285,6 @@ async def process_ai_message(update: Update, prompt: str):
     
     await m.edit_text(res, parse_mode='Markdown', disable_web_page_preview=True)
     
-    # Just update activity count
     c.execute("UPDATE users SET generated_count=generated_count+1 WHERE user_id=%s", (u[0],))
     conn.commit()
     conn.close()
@@ -349,9 +347,6 @@ async def image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ======================================================
 # ADMIN & SYSTEM COMMANDS
 # ======================================================
-# ... [Admin commands remain identical to your previous version: /cmds, /stats, /gencoins, /addcoin, /broadcast, /add_admin etc] ...
-# (Kept short here to ensure full layout structure, the logic is all preserved via DB)
-
 async def admin_cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_admin(update.effective_user.id): return
     text = ("🛠 **ADMIN COMMANDS** 🛠\n🔹 `/stats`, `/addcoin <id> <amt>`, `/ban <id>`, `/unban <id>`, `/broadcast <msg>`, `/gencoins <PLAN>`\n👑 **OWNER** 👑\n🔸 `/add_admin <id>`, `/removecoin`, `/setplan`, `/userlist`, `/maintenance on/off`")
@@ -412,4 +407,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
