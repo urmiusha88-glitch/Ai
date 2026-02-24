@@ -89,7 +89,7 @@ if not st.session_state.logged_in:
     st.markdown("<h1 style='font-size: 2.2rem; color: #10a37f;'>⚡ Minato AI</h1>", unsafe_allow_html=True)
     st.markdown("<p style='color:#9CA3AF;'>Enter your Telegram ID to login</p>", unsafe_allow_html=True)
     
-    telegram_id_input = st.text_input("Telegram ID", placeholder="e.g. 6198703244", type="password", label_visibility="collapsed")
+    telegram_id_input = st.text_input("Telegram ID", placeholder="e.g. 6198xxxxxxx", type="password", label_visibility="collapsed")
     
     if st.button("Secure Login"):
         if telegram_id_input.strip() == "":
@@ -288,3 +288,4 @@ if user_input := st.chat_input("Ask Minato anything..."):
     
     st.session_state.messages.append({"role": "assistant", "content": bot_reply})
     st.rerun() # Refresh page so sidebar session timer updates
+
